@@ -8,13 +8,19 @@ on:
     - cron: "*/30 * * * *"
   workflow_dispatch:
 
+concurrency:
+  group: xml-feed
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repo (full history)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # IMPORTANT: required for git pull/rebase
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -34,15 +40,18 @@ jobs:
       - name: Run script
         run: python generate_xml.py
 
-      - name: Commit XML
+      - name: Commit and Push XML (safe)
         run: |
-         git config --global user.name "bot"
-         git config --global user.email "bot@example.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-         # Pull latest changes FIRST
-         git pull --rebase origin main
+          git add feed.xml
 
-         git add feed.xml
-         git commit -m "Update XML" || echo "No changes"
+          # Commit only if changes exist
+          git diff --cached --quiet || git commit -m "Update XML"
 
-         git push origin main
+          # Rebase with latest remote changes
+          git pull --rebase origin main
+
+          # Push safely
+          git push origin main
