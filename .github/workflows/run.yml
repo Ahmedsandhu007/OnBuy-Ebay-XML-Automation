@@ -38,7 +38,11 @@ jobs:
         run: |
          git config --global user.name "bot"
          git config --global user.email "bot@example.com"
+
+         # Pull latest changes FIRST
+         git pull --rebase origin main
+
          git add feed.xml
          git commit -m "Update XML" || echo "No changes"
-         git pull --rebase
-         git push
+
+         git push origin main
