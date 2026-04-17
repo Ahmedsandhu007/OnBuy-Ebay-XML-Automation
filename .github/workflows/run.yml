@@ -1,5 +1,8 @@
 name: Generate XML Feed
 
+permissions:
+  contents: write
+
 on:
   schedule:
     - cron: "*/30 * * * *"
@@ -24,6 +27,9 @@ jobs:
       - name: Save credentials
         run: |
           printf '%s' '${{ secrets.GOOGLE_CREDS }}' > credentials.json
+
+      - name: Set credentials env
+        run: echo "GOOGLE_APPLICATION_CREDENTIALS=credentials.json" >> $GITHUB_ENV
 
       - name: Run script
         run: python generate_xml.py
