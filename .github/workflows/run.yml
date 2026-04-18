@@ -4,6 +4,8 @@ permissions:
   contents: write
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+env:
+  RAINFOREST_API_KEY: ${{ secrets.RAINFOREST_API_KEY }}
 
 on:
   schedule:
