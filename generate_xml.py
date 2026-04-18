@@ -7,10 +7,10 @@ import json
 import os
 import re
 import random
+import xml.etree.ElementTree as ET
 
 # ================= CONFIG =================
 API_KEY = os.getenv("RAINFOREST_API_KEY")
-ONBUY_BASE64 = os.getenv("ONBUY_BASE64")
 
 FEE = 0.18
 MIN_PROFIT = 0.21
@@ -32,56 +32,6 @@ data = sheet.get_all_records()
 headers = {
     "User-Agent": "Mozilla/5.0"
 }
-
-# ================= ONBUY UPDATE =================
-def update_onbuy_product(sku, price, quantity):
-    try:
-        base_url = "https://api.onbuy.com/gb/v2"
-
-        headers = {
-            "Authorization": f"Basic {ONBUY_BASE64}",
-            "Content-Type": "application/json"
-        }
-
-        # PRICE
-        price_payload = {
-            "products": [
-                {
-                    "sku": str(sku),
-                    "price": float(price)
-                }
-            ]
-        }
-
-        res_price = requests.post(
-            f"{base_url}/products/update-price",
-            json=price_payload,
-            headers=headers
-        )
-
-        print(f"PRICE → {sku} → {res_price.status_code}")
-
-        # STOCK
-        stock_payload = {
-            "products": [
-                {
-                    "sku": str(sku),
-                    "quantity": int(quantity)
-                }
-            ]
-        }
-
-        res_stock = requests.post(
-            f"{base_url}/products/update-stock",
-            json=stock_payload,
-            headers=headers
-        )
-
-        print(f"STOCK → {sku} → {res_stock.status_code}")
-
-    except Exception as e:
-        print("OnBuy error:", e)
-
 
 # ================= AMAZON =================
 def extract_asin(url):
@@ -168,8 +118,11 @@ def get_ebay_data(url):
         return None, None
 
 
+# ================= XML ROOT =================
+root = ET.Element("products")
+
 # ================= MAIN =================
-for i, row in enumerate(data[:1], start=2):  # TEST FIRST PRODUCT
+for i, row in enumerate(data, start=2):  # ✅ ALL ROWS
 
     url = str(row.get("Supplier URL", "")).lower()
 
@@ -183,23 +136,24 @@ for i, row in enumerate(data[:1], start=2):  # TEST FIRST PRODUCT
 
     print(f"Result → Stock: {stock}, Price: {price}")
 
+    # Fallbacks
     if price is None:
         price = row.get("Cost Price (£)", 0)
 
     if stock is None:
         stock = row.get("Stock", 0)
 
-    # 🎯 CORRECT PRICING LOGIC
+    # 🎯 PRICING LOGIC
     profit = random.uniform(MIN_PROFIT, MAX_PROFIT)
 
     if (FEE + profit) >= 1:
-        profit = 0.21  # safety fallback
+        profit = 0.21
 
     selling_price = round(price / (1 - FEE - profit), 2)
 
     status = "ACTIVE" if stock > 0 else "INACTIVE"
 
-    # UPDATE SHEET
+    # ================= UPDATE SHEET =================
     sheet.update(range_name=f"H{i}:O{i}", values=[[
         price,
         "", "", "",
@@ -209,14 +163,27 @@ for i, row in enumerate(data[:1], start=2):  # TEST FIRST PRODUCT
         datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ]])
 
-    # UPDATE ONBUY
-    update_onbuy_product(
-        sku=row.get("SKU"),
-        price=selling_price,
-        quantity=stock
-    )
+    # ================= XML =================
+    if status == "ACTIVE":
+
+        product = ET.SubElement(root, "product")
+
+        ET.SubElement(product, "sku").text = str(row.get("SKU", ""))
+        ET.SubElement(product, "title").text = row.get("Title", "")
+        ET.SubElement(product, "description").text = row.get("Description", "")
+        ET.SubElement(product, "price").text = str(selling_price)
+        ET.SubElement(product, "quantity").text = str(stock)
+        ET.SubElement(product, "brand").text = row.get("Brand", "")
+        ET.SubElement(product, "image_url").text = row.get("Image URL", "")
+        ET.SubElement(product, "additional_images").text = row.get("Additional Images", "")
+        ET.SubElement(product, "category").text = row.get("Category", "")
+        ET.SubElement(product, "condition").text = row.get("Condition", "")
 
     print(f"Processed row {i}")
     time.sleep(1)
 
-print("DONE")
+# ================= SAVE XML =================
+tree = ET.ElementTree(root)
+tree.write("feed.xml", encoding="utf-8", xml_declaration=True)
+
+print("XML GENERATED SUCCESSFULLY")
