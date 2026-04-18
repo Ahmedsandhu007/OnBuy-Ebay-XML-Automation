@@ -140,12 +140,20 @@ for i, row in enumerate(data, start=2):
     raw_supplier = str(row.get("Supplier") or row.get("Source") or "")
     supplier = raw_supplier.strip().lower()
 
-    url = row.get("Supplier URL")
+    url = str(row.get("Supplier URL", "")).lower()
 
-    stock, price = None, None
+stock, price = None, None
+
+    # --- DETECT PLATFORM FROM URL ---
+    if "amazon." in url:
+    stock, price = get_amazon_data(url)
+
+    elif "ebay." in url:
+    stock, price = get_ebay_data(url)
 
     # --- DEBUG ---
-    print(f"Supplier raw: {raw_supplier} → normalized: {supplier}")
+    print(f"URL: {url}")
+    print(f"Detected → Stock: {stock}, Price: {price}")
 
     # --- FETCH ---
     if "amazon" in supplier:
