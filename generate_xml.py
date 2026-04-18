@@ -39,9 +39,7 @@ def extract_asin(url):
 def get_amazon_data(url):
     try:
         asin = extract_asin(url)
-
         if not asin:
-            print("❌ ASIN not found:", url)
             return None, None
 
         params = {
@@ -51,23 +49,10 @@ def get_amazon_data(url):
             "asin": asin
         }
 
-        res = requests.get(
-            "https://api.rainforestapi.com/request",
-            params=params,
-            timeout=20
-        )
-
-        if res.status_code != 200:
-            print("❌ API error:", res.status_code)
-            return None, None
-
+        res = requests.get("https://api.rainforestapi.com/request", params=params, timeout=20)
         data = res.json().get("product", {})
 
-        if not data:
-            return None, None
-
         price = None
-
         if data.get("buybox_winner"):
             price = data["buybox_winner"]["price"]["value"]
         elif data.get("price"):
@@ -99,9 +84,12 @@ def get_ebay_data(url):
         res = requests.get(url, headers=headers, timeout=15)
         soup = BeautifulSoup(res.text, "html.parser")
 
+        text = soup.text.lower()
+
+        # ---------- PRICE ----------
         price = None
 
-        # ----- 1. JSON SCRIPT PARSING -----
+        # JSON extraction
         for script in soup.find_all("script"):
             if script.string and "price" in script.string:
                 matches = re.findall(r'"price":"?([0-9]+\.[0-9]+)"?', script.string)
@@ -109,15 +97,9 @@ def get_ebay_data(url):
                     price = float(matches[0])
                     break
 
-        # ----- 2. SELECTORS -----
+        # Selectors
         if price is None:
-            selectors = [
-                ".x-price-primary span",
-                ".ux-textspans--BOLD",
-                "#prcIsum",
-                "#mm-saleDscPrc"
-            ]
-
+            selectors = [".x-price-primary span", "#prcIsum"]
             for sel in selectors:
                 tag = soup.select_one(sel)
                 if tag:
@@ -126,13 +108,42 @@ def get_ebay_data(url):
                         price = float(txt)
                         break
 
-        # ----- 3. REGEX FALLBACK -----
+        # Regex fallback
         if price is None:
             matches = re.findall(r"£\s?([0-9]+(?:\.[0-9]{1,2})?)", soup.text)
             if matches:
                 price = float(matches[0])
 
-        stock = 0 if "out of stock" in soup.text.lower() else 1
+        # ---------- STOCK (FIXED) ----------
+        stock = None
+
+        # 1. Quantity detection (MOST IMPORTANT)
+        qty_match = re.search(r"(\d+)\s+available", text)
+        if qty_match:
+            try:
+                stock = int(qty_match.group(1))
+            except:
+                stock = 1
+
+        # 2. Limited stock phrases
+        if stock is None:
+            if "last one" in text:
+                stock = 1
+            elif "limited quantity" in text:
+                stock = 2
+
+        # 3. Out-of-stock / ended listing
+        if any(x in text for x in [
+            "out of stock",
+            "this listing was ended",
+            "sold out",
+            "no longer available"
+        ]):
+            stock = 0
+
+        # 4. Final fallback
+        if stock is None:
+            stock = 1
 
         print(f"eBay parsed → Stock: {stock}, Price: {price}")
 
@@ -153,7 +164,6 @@ for i, row in enumerate(data, start=2):
 
     stock, price = None, None
 
-    # PLATFORM DETECTION
     if "amazon." in url:
         stock, price = get_amazon_data(url)
 
@@ -163,7 +173,7 @@ for i, row in enumerate(data, start=2):
     print(f"URL: {url}")
     print(f"Result → Stock: {stock}, Price: {price}")
 
-    # FALLBACK
+    # Fallback
     if price is None:
         price = row.get("Cost Price (£)", 0)
 
@@ -176,7 +186,7 @@ for i, row in enumerate(data, start=2):
     status = "ACTIVE" if stock > 0 else "INACTIVE"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # UPDATE SHEET
+    # Sheet update
     try:
         sheet.update(range_name=f"H{i}:O{i}", values=[[
             cost_price,
@@ -189,7 +199,7 @@ for i, row in enumerate(data, start=2):
     except Exception as e:
         print("Sheet error:", e)
 
-    # XML ENTRY
+    # XML
     if status == "ACTIVE":
         product = ET.SubElement(root, "product")
 
