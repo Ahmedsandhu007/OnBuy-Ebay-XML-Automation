@@ -39,16 +39,11 @@ headers = {
     "Accept-Language": "en-GB,en;q=0.9"
 }
 
-# --- ASIN EXTRACT ---
+# --- ASIN EXTRACT (FIXED) ---
 def extract_asin(url):
-    patterns = [
-        r"/dp/([A-Z0-9]{10})",
-        r"/gp/product/([A-Z0-9]{10})"
-    ]
-    for p in patterns:
-        match = re.search(p, url)
-        if match:
-            return match.group(1)
+    match = re.search(r"/(?:dp|gp/product)/([A-Za-z0-9]{10})", url)
+    if match:
+        return match.group(1).upper()  # normalize
     return None
 
 
