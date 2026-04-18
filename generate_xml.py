@@ -78,32 +78,46 @@ def get_amazon_data(url):
         return None, None
 
 
-# ================= EBAY =================
+# ================= EBAY (IMPROVED) =================
 def get_ebay_data(url):
     try:
         from bs4 import BeautifulSoup
 
         res = requests.get(url, headers=headers, timeout=30)
         soup = BeautifulSoup(res.text, "html.parser")
-        text = soup.text.lower()
 
         price = None
 
-        for script in soup.find_all("script"):
-            if script.string and "price" in script.string:
-                m = re.findall(r'"price":"?([0-9]+\.[0-9]+)"?', script.string)
-                if m:
-                    price = float(m[0])
+        # 🔹 Try multiple selectors
+        selectors = [
+            ".x-price-primary span",
+            ".ux-textspans--BOLD",
+            ".notranslate",
+            "#prcIsum",
+            "#mm-saleDscPrc"
+        ]
+
+        for sel in selectors:
+            tag = soup.select_one(sel)
+            if tag:
+                text = tag.text.strip().replace("£", "").replace(",", "")
+                match = re.findall(r"\d+\.?\d*", text)
+                if match:
+                    price = float(match[0])
                     break
 
+        # 🔹 Fallback: regex search entire page
         if price is None:
+            text = soup.text
             matches = re.findall(r"£\s?([0-9]+(?:\.[0-9]{1,2})?)", text)
             if matches:
                 price = float(matches[0])
 
+        # 🔹 STOCK
+        text_lower = soup.text.lower()
         stock = None
 
-        qty_match = re.search(r"(\d+)\s+available", text)
+        qty_match = re.search(r"(\d+)\s+available", text_lower)
         if qty_match:
             stock = int(qty_match.group(1))
 
@@ -122,7 +136,7 @@ def get_ebay_data(url):
 root = ET.Element("products")
 
 # ================= MAIN =================
-for i, row in enumerate(data, start=2):  # ✅ ALL ROWS
+for i, row in enumerate(data, start=2):
 
     url = str(row.get("Supplier URL", "")).lower()
 
@@ -136,14 +150,14 @@ for i, row in enumerate(data, start=2):  # ✅ ALL ROWS
 
     print(f"Result → Stock: {stock}, Price: {price}")
 
-    # Fallbacks
+    # 🔹 Fallbacks (VERY IMPORTANT)
     if price is None:
         price = row.get("Cost Price (£)", 0)
 
     if stock is None:
         stock = row.get("Stock", 0)
 
-    # 🎯 PRICING LOGIC
+    # 🎯 PRICING
     profit = random.uniform(MIN_PROFIT, MAX_PROFIT)
 
     if (FEE + profit) >= 1:
@@ -153,7 +167,7 @@ for i, row in enumerate(data, start=2):  # ✅ ALL ROWS
 
     status = "ACTIVE" if stock > 0 else "INACTIVE"
 
-    # ================= UPDATE SHEET =================
+    # ================= SHEET UPDATE =================
     sheet.update(range_name=f"H{i}:O{i}", values=[[
         price,
         "", "", "",
