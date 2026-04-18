@@ -30,7 +30,7 @@ headers = {
 
 # ================= ONBUY TOKEN =================
 def get_onbuy_token():
-    url = "https://api.onbuy.com/gb/v2/oauth/token"
+    url = "https://api.onbuy.com/v2/oauth/token"
 
     headers = {
         "Authorization": f"Basic {os.getenv('ONBUY_BASE64')}",
