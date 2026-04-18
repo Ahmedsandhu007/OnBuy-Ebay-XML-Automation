@@ -107,7 +107,7 @@ def get_amazon_data(url):
         return None, None
 
 
-# --- EBAY (ROBUST) ---
+# --- EBAY (FINAL ROBUST) ---
 def get_ebay_data(url):
     try:
         from bs4 import BeautifulSoup
@@ -117,6 +117,7 @@ def get_ebay_data(url):
 
         price = None
 
+        # --- STEP 1: Try selectors ---
         selectors = [
             ".x-price-primary span",
             ".ux-textspans--BOLD",
@@ -131,14 +132,23 @@ def get_ebay_data(url):
                 text = tag.text.strip()
                 if "£" in text:
                     try:
-                        cleaned = text.replace("£", "").replace(",", "")
-                        price = float(cleaned)
+                        price = float(text.replace("£", "").replace(",", ""))
                         break
                     except:
                         continue
             if price:
                 break
 
+        # --- STEP 2: REGEX FALLBACK ---
+        if price is None:
+            matches = re.findall(r"£\s?([0-9]+(?:\.[0-9]{1,2})?)", soup.text)
+            if matches:
+                try:
+                    price = float(matches[0])
+                except:
+                    pass
+
+        # --- STOCK ---
         stock = 1
         if "out of stock" in soup.text.lower():
             stock = 0
