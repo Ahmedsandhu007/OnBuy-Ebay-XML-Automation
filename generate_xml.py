@@ -1,20 +1,17 @@
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import requests
-from bs4 import BeautifulSoup
 import xml.etree.ElementTree as ET
 from datetime import datetime
 import time
-
-# --- AUTH ---
-scope = [
-    "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive"
-]
-
 import json
 import os
+import re
 
+# --- CONFIG ---
+API_KEY = os.getenv("RAINFOREST_API_KEY")
+
+# --- AUTH ---
 scope = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive"
@@ -37,48 +34,72 @@ headers = {
     "Accept-Language": "en-GB,en;q=0.9"
 }
 
-# --- AMAZON ---
+# --- ASIN EXTRACT ---
+def extract_asin(url):
+    patterns = [
+        r"/dp/([A-Z0-9]{10})",
+        r"/gp/product/([A-Z0-9]{10})"
+    ]
+    for p in patterns:
+        match = re.search(p, url)
+        if match:
+            return match.group(1)
+    return None
+
+
+# --- AMAZON (API) ---
 def get_amazon_data(url):
     try:
-        res = requests.get(url, headers=headers, timeout=15)
-        soup = BeautifulSoup(res.text, "html.parser")
+        asin = extract_asin(url)
 
+        if not asin:
+            print("❌ ASIN not found:", url)
+            return None, None
+
+        params = {
+            "api_key": API_KEY,
+            "type": "product",
+            "amazon_domain": "amazon.co.uk",
+            "asin": asin
+        }
+
+        res = requests.get("https://api.rainforestapi.com/request", params=params, timeout=20)
+
+        if res.status_code != 200:
+            print("❌ API error:", res.status_code)
+            return None, None
+
+        data = res.json()
+        product = data.get("product", {})
+
+        if not product:
+            return None, None
+
+        # --- PRICE ---
         price = None
 
-        selectors = [
-            ".a-price .a-offscreen",
-            "#priceblock_ourprice",
-            "#priceblock_dealprice"
-        ]
+        buybox = product.get("buybox_winner")
+        if buybox and buybox.get("price"):
+            price = buybox["price"]["value"]
+        elif product.get("price"):
+            price = product["price"].get("value")
 
-        for sel in selectors:
-            tag = soup.select_one(sel)
-            if tag:
-                text = tag.text.replace("£", "").replace(",", "").strip()
-                try:
-                    price = float(text)
-                    break
-                except:
-                    continue
+        # --- STOCK ---
+        availability = product.get("availability", "").lower()
 
-        # --- STOCK LOGIC ---
-        stock = 0
-        availability = soup.select_one("#availability")
+        if "in stock" in availability:
+            stock = 10
+        elif "out of stock" in availability:
+            stock = 0
+        else:
+            stock = 5
 
-        if availability:
-            text = availability.text.lower()
-
-            if "in stock" in text or "available" in text:
-                stock = 10
-            elif "only" in text:
-                stock = 5
-            else:
-                stock = 0
+        print(f"Amazon API | {asin} | Stock: {stock} | Price: {price}")
 
         return stock, price
 
     except Exception as e:
-        print("Amazon error:", e)
+        print("Amazon API error:", e)
         return None, None
 
 
@@ -86,6 +107,7 @@ def get_amazon_data(url):
 def get_ebay_data(url):
     try:
         res = requests.get(url, headers=headers, timeout=15)
+        from bs4 import BeautifulSoup
         soup = BeautifulSoup(res.text, "html.parser")
 
         price = None
@@ -119,58 +141,48 @@ for i, row in enumerate(data, start=2):
 
     stock, price = None, None
 
-    # --- FETCH DATA ---
+    # --- FETCH ---
     if supplier == "Amazon":
         stock, price = get_amazon_data(url)
-
     elif supplier == "eBay":
         stock, price = get_ebay_data(url)
 
-    # --- DEBUG ---
-    print(f"{supplier} | Stock: {stock} | Price: {price}")
+    # --- FALLBACK ---
+    if price is None:
+        price = row.get("Cost Price (£)", 0)
 
-    # --- UPDATE LOCAL ROW (CRITICAL FIX) ---
-    if stock is not None:
-        row["Stock"] = stock
+    if stock is None:
+        stock = row.get("Stock", 0)
 
-    if price is not None:
-        cost_price = round(price, 2)
-        selling_price = round(price * 1.35, 2)
+    # --- CALCULATE ---
+    cost_price = round(price, 2)
+    selling_price = round(price * 1.35, 2)
 
-        row["Cost Price (£)"] = cost_price
-        row["Selling Price (£)"] = selling_price
-
-    # --- STATUS ---
-    status = "ACTIVE"
-    if stock == 0:
-        status = "INACTIVE"
-        row["Status"] = status
-
+    status = "ACTIVE" if stock > 0 else "INACTIVE"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # --- SHEET UPDATE (BATCH) ---
+    # --- UPDATE SHEET ---
     try:
-        sheet.update(f"H{i}:O{i}", [[
-            row.get("Cost Price (£)", ""),
+        sheet.update(range_name=f"H{i}:O{i}", values=[[
+            cost_price,
             "", "", "",
-            row.get("Stock", ""),
-            row.get("Selling Price (£)", ""),
+            stock,
+            selling_price,
             status,
             timestamp
         ]])
     except Exception as e:
-        print("Sheet update error:", e)
+        print("Sheet error:", e)
 
-    # --- XML GENERATION ---
-    if row.get("Status") == "ACTIVE":
-
+    # --- XML ---
+    if status == "ACTIVE":
         product = ET.SubElement(root, "product")
 
         ET.SubElement(product, "sku").text = str(row.get("SKU", ""))
         ET.SubElement(product, "title").text = row.get("Title", "")
         ET.SubElement(product, "description").text = row.get("Description", "")
-        ET.SubElement(product, "price").text = str(row.get("Selling Price (£)", ""))
-        ET.SubElement(product, "quantity").text = str(row.get("Stock", ""))
+        ET.SubElement(product, "price").text = str(selling_price)
+        ET.SubElement(product, "quantity").text = str(stock)
         ET.SubElement(product, "brand").text = row.get("Brand", "")
         ET.SubElement(product, "image_url").text = row.get("Image URL", "")
         ET.SubElement(product, "additional_images").text = row.get("Additional Images", "")
@@ -178,7 +190,6 @@ for i, row in enumerate(data, start=2):
         ET.SubElement(product, "condition").text = row.get("Condition", "")
 
     print(f"Processed row {i}")
-
     time.sleep(2)
 
 # --- SAVE XML ---
