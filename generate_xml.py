@@ -6,10 +6,15 @@ import time
 import json
 import os
 import re
+import random
 
 # ================= CONFIG =================
 API_KEY = os.getenv("RAINFOREST_API_KEY")
 ONBUY_BASE64 = os.getenv("ONBUY_BASE64")
+
+FEE = 0.18
+MIN_PROFIT = 0.21
+MAX_PROFIT = 0.25
 
 # ================= AUTH =================
 scope = [
@@ -28,7 +33,7 @@ headers = {
     "User-Agent": "Mozilla/5.0"
 }
 
-# ================= ONBUY UPDATE (FINAL FIX) =================
+# ================= ONBUY UPDATE =================
 def update_onbuy_product(sku, price, quantity):
     try:
         base_url = "https://api.onbuy.com/gb/v2"
@@ -38,7 +43,7 @@ def update_onbuy_product(sku, price, quantity):
             "Content-Type": "application/json"
         }
 
-        # 🔹 PRICE UPDATE
+        # PRICE
         price_payload = {
             "products": [
                 {
@@ -54,9 +59,9 @@ def update_onbuy_product(sku, price, quantity):
             headers=headers
         )
 
-        print(f"PRICE → {sku} → {res_price.status_code} → {res_price.text}")
+        print(f"PRICE → {sku} → {res_price.status_code}")
 
-        # 🔹 STOCK UPDATE
+        # STOCK
         stock_payload = {
             "products": [
                 {
@@ -72,7 +77,7 @@ def update_onbuy_product(sku, price, quantity):
             headers=headers
         )
 
-        print(f"STOCK → {sku} → {res_stock.status_code} → {res_stock.text}")
+        print(f"STOCK → {sku} → {res_stock.status_code}")
 
     except Exception as e:
         print("OnBuy error:", e)
@@ -164,7 +169,7 @@ def get_ebay_data(url):
 
 
 # ================= MAIN =================
-for i, row in enumerate(data[:1], start=2):  # TEST 1 PRODUCT
+for i, row in enumerate(data[:1], start=2):  # TEST FIRST PRODUCT
 
     url = str(row.get("Supplier URL", "")).lower()
 
@@ -184,10 +189,17 @@ for i, row in enumerate(data[:1], start=2):  # TEST 1 PRODUCT
     if stock is None:
         stock = row.get("Stock", 0)
 
-    selling_price = round(price * 1.35, 2)
+    # 🎯 CORRECT PRICING LOGIC
+    profit = random.uniform(MIN_PROFIT, MAX_PROFIT)
+
+    if (FEE + profit) >= 1:
+        profit = 0.21  # safety fallback
+
+    selling_price = round(price / (1 - FEE - profit), 2)
+
     status = "ACTIVE" if stock > 0 else "INACTIVE"
 
-    # Update Sheet
+    # UPDATE SHEET
     sheet.update(range_name=f"H{i}:O{i}", values=[[
         price,
         "", "", "",
@@ -197,7 +209,7 @@ for i, row in enumerate(data[:1], start=2):  # TEST 1 PRODUCT
         datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ]])
 
-    # 🚀 ONBUY UPDATE
+    # UPDATE ONBUY
     update_onbuy_product(
         sku=row.get("SKU"),
         price=selling_price,
