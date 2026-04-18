@@ -136,25 +136,20 @@ root = ET.Element("products")
 # --- MAIN LOOP ---
 for i, row in enumerate(data, start=2):
 
-    # --- SAFE SUPPLIER DETECTION ---
-    raw_supplier = str(row.get("Supplier") or row.get("Source") or "")
-    supplier = raw_supplier.strip().lower()
+    url = str(row.get("Supplier URL", "")).strip().lower()
 
-    url = str(row.get("Supplier URL", "")).lower()
-
-stock, price = None, None
+    stock, price = None, None
 
     # --- DETECT PLATFORM FROM URL ---
     if "amazon." in url:
-    stock, price = get_amazon_data(url)
+        stock, price = get_amazon_data(url)
 
     elif "ebay." in url:
-    stock, price = get_ebay_data(url)
+        stock, price = get_ebay_data(url)
 
     # --- DEBUG ---
     print(f"URL: {url}")
-    print(f"Detected → Stock: {stock}, Price: {price}")
-
+    print(f"Result → Stock: {stock}, Price: {price}")
     # --- FETCH ---
     if "amazon" in supplier:
         stock, price = get_amazon_data(url)
