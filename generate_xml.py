@@ -17,7 +17,12 @@ scope = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-creds_dict = json.loads(os.environ.get("GOOGLE_CREDENTIALS", "{}"))
+creds_raw = os.environ.get("GOOGLE_CREDENTIALS")
+
+if not creds_raw:
+    raise Exception("GOOGLE_CREDENTIALS is missing")
+
+creds_dict = json.loads(creds_raw)
 
 creds = ServiceAccountCredentials.from_json_keyfile_dict(
     creds_dict,
@@ -47,7 +52,7 @@ def extract_asin(url):
     return None
 
 
-# --- AMAZON (API) ---
+# --- AMAZON API ---
 def get_amazon_data(url):
     try:
         asin = extract_asin(url)
@@ -63,7 +68,11 @@ def get_amazon_data(url):
             "asin": asin
         }
 
-        res = requests.get("https://api.rainforestapi.com/request", params=params, timeout=20)
+        res = requests.get(
+            "https://api.rainforestapi.com/request",
+            params=params,
+            timeout=20
+        )
 
         if res.status_code != 200:
             print("❌ API error:", res.status_code)
@@ -73,12 +82,13 @@ def get_amazon_data(url):
         product = data.get("product", {})
 
         if not product:
+            print("❌ Empty product data:", asin)
             return None, None
 
         # --- PRICE ---
         price = None
-
         buybox = product.get("buybox_winner")
+
         if buybox and buybox.get("price"):
             price = buybox["price"]["value"]
         elif product.get("price"):
@@ -106,8 +116,9 @@ def get_amazon_data(url):
 # --- EBAY ---
 def get_ebay_data(url):
     try:
-        res = requests.get(url, headers=headers, timeout=15)
         from bs4 import BeautifulSoup
+
+        res = requests.get(url, headers=headers, timeout=15)
         soup = BeautifulSoup(res.text, "html.parser")
 
         price = None
@@ -140,7 +151,7 @@ for i, row in enumerate(data, start=2):
 
     stock, price = None, None
 
-    # --- DETECT PLATFORM FROM URL ---
+    # --- PLATFORM DETECTION ---
     if "amazon." in url:
         stock, price = get_amazon_data(url)
 
@@ -149,15 +160,6 @@ for i, row in enumerate(data, start=2):
 
     # --- DEBUG ---
     print(f"URL: {url}")
-    print(f"Result → Stock: {stock}, Price: {price}")
-    # --- FETCH ---
-    if "amazon" in supplier:
-        stock, price = get_amazon_data(url)
-
-    elif "ebay" in supplier:
-        stock, price = get_ebay_data(url)
-
-    # --- DEBUG RESULT ---
     print(f"Result → Stock: {stock}, Price: {price}")
 
     # --- FALLBACK ---
@@ -187,7 +189,7 @@ for i, row in enumerate(data, start=2):
     except Exception as e:
         print("Sheet error:", e)
 
-    # --- XML ---
+    # --- XML GENERATION ---
     if status == "ACTIVE":
         product = ET.SubElement(root, "product")
 
@@ -204,6 +206,7 @@ for i, row in enumerate(data, start=2):
 
     print(f"Processed row {i}")
     time.sleep(2)
+
 # --- SAVE XML ---
 tree = ET.ElementTree(root)
 tree.write("feed.xml", encoding="utf-8", xml_declaration=True)
