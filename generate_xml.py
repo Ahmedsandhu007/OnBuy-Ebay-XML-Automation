@@ -8,27 +8,20 @@ import json
 import os
 import re
 
-# --- CONFIG ---
+# ================= CONFIG =================
 API_KEY = os.getenv("RAINFOREST_API_KEY")
 
-# --- AUTH ---
+# ================= AUTH =================
 scope = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive"
 ]
 
-creds_raw = os.environ.get("GOOGLE_CREDENTIALS")
-if not creds_raw:
-    raise Exception("GOOGLE_CREDENTIALS is missing")
+creds_dict = json.loads(os.environ["GOOGLE_CREDENTIALS"])
 
-creds_dict = json.loads(creds_raw)
-
-creds = ServiceAccountCredentials.from_json_keyfile_dict(
-    creds_dict,
-    scope
-)
-
+creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 client = gspread.authorize(creds)
+
 sheet = client.open("OnBuy_Feed_Master").sheet1
 data = sheet.get_all_records()
 
@@ -37,15 +30,12 @@ headers = {
     "Accept-Language": "en-GB,en;q=0.9"
 }
 
-# --- ASIN EXTRACT (UNIVERSAL) ---
+# ================= AMAZON =================
 def extract_asin(url):
     match = re.search(r"/(?:dp|gp/product|gp/aw/d)/([A-Za-z0-9]{10})", url)
-    if match:
-        return match.group(1).upper()
-    return None
+    return match.group(1).upper() if match else None
 
 
-# --- AMAZON API ---
 def get_amazon_data(url):
     try:
         asin = extract_asin(url)
@@ -71,22 +61,19 @@ def get_amazon_data(url):
             print("❌ API error:", res.status_code)
             return None, None
 
-        data = res.json()
-        product = data.get("product", {})
+        data = res.json().get("product", {})
 
-        if not product:
-            print("❌ Empty product:", asin)
+        if not data:
             return None, None
 
         price = None
-        buybox = product.get("buybox_winner")
 
-        if buybox and buybox.get("price"):
-            price = buybox["price"]["value"]
-        elif product.get("price"):
-            price = product["price"].get("value")
+        if data.get("buybox_winner"):
+            price = data["buybox_winner"]["price"]["value"]
+        elif data.get("price"):
+            price = data["price"]["value"]
 
-        availability = product.get("availability", "").lower()
+        availability = data.get("availability", "").lower()
 
         if "in stock" in availability:
             stock = 10
@@ -100,11 +87,11 @@ def get_amazon_data(url):
         return stock, price
 
     except Exception as e:
-        print("Amazon API error:", e)
+        print("Amazon error:", e)
         return None, None
 
 
-# --- EBAY (MAXIMUM ROBUST) ---
+# ================= EBAY =================
 def get_ebay_data(url):
     try:
         from bs4 import BeautifulSoup
@@ -114,16 +101,15 @@ def get_ebay_data(url):
 
         price = None
 
-        # --- METHOD 1: JSON SCRIPT PARSING (BEST) ---
-        scripts = soup.find_all("script")
-        for script in scripts:
+        # ----- 1. JSON SCRIPT PARSING -----
+        for script in soup.find_all("script"):
             if script.string and "price" in script.string:
                 matches = re.findall(r'"price":"?([0-9]+\.[0-9]+)"?', script.string)
                 if matches:
                     price = float(matches[0])
                     break
 
-        # --- METHOD 2: SELECTORS ---
+        # ----- 2. SELECTORS -----
         if price is None:
             selectors = [
                 ".x-price-primary span",
@@ -135,26 +121,18 @@ def get_ebay_data(url):
             for sel in selectors:
                 tag = soup.select_one(sel)
                 if tag:
-                    text = tag.text.strip()
-                    if "£" in text:
-                        try:
-                            price = float(text.replace("£", "").replace(",", ""))
-                            break
-                        except:
-                            pass
+                    txt = tag.text.replace("£", "").replace(",", "").strip()
+                    if txt.replace(".", "").isdigit():
+                        price = float(txt)
+                        break
 
-        # --- METHOD 3: REGEX FALLBACK ---
+        # ----- 3. REGEX FALLBACK -----
         if price is None:
             matches = re.findall(r"£\s?([0-9]+(?:\.[0-9]{1,2})?)", soup.text)
             if matches:
-                try:
-                    price = float(matches[0])
-                except:
-                    pass
+                price = float(matches[0])
 
-        stock = 1
-        if "out of stock" in soup.text.lower():
-            stock = 0
+        stock = 0 if "out of stock" in soup.text.lower() else 1
 
         print(f"eBay parsed → Stock: {stock}, Price: {price}")
 
@@ -165,17 +143,17 @@ def get_ebay_data(url):
         return None, None
 
 
-# --- XML ROOT ---
+# ================= XML =================
 root = ET.Element("products")
 
-# --- MAIN LOOP ---
+# ================= MAIN LOOP =================
 for i, row in enumerate(data, start=2):
 
     url = str(row.get("Supplier URL", "")).strip().lower()
 
     stock, price = None, None
 
-    # --- DETECT PLATFORM ---
+    # PLATFORM DETECTION
     if "amazon." in url:
         stock, price = get_amazon_data(url)
 
@@ -185,7 +163,7 @@ for i, row in enumerate(data, start=2):
     print(f"URL: {url}")
     print(f"Result → Stock: {stock}, Price: {price}")
 
-    # --- FALLBACK ---
+    # FALLBACK
     if price is None:
         price = row.get("Cost Price (£)", 0)
 
@@ -198,7 +176,7 @@ for i, row in enumerate(data, start=2):
     status = "ACTIVE" if stock > 0 else "INACTIVE"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # --- UPDATE SHEET ---
+    # UPDATE SHEET
     try:
         sheet.update(range_name=f"H{i}:O{i}", values=[[
             cost_price,
@@ -211,7 +189,7 @@ for i, row in enumerate(data, start=2):
     except Exception as e:
         print("Sheet error:", e)
 
-    # --- XML ---
+    # XML ENTRY
     if status == "ACTIVE":
         product = ET.SubElement(root, "product")
 
@@ -229,7 +207,7 @@ for i, row in enumerate(data, start=2):
     print(f"Processed row {i}")
     time.sleep(2)
 
-# --- SAVE XML ---
+# SAVE XML
 tree = ET.ElementTree(root)
 tree.write("feed.xml", encoding="utf-8", xml_declaration=True)
 
