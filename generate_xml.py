@@ -28,35 +28,13 @@ headers = {
     "User-Agent": "Mozilla/5.0"
 }
 
-# ================= ONBUY TOKEN =================
-def get_onbuy_token():
-    url = "https://api.onbuy.com/v2/oauth/token"
-
-    headers = {
-        "Authorization": f"Basic {os.getenv('ONBUY_BASE64')}",
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
-
-    data = {"grant_type": "client_credentials"}
-
-    res = requests.post(url, headers=headers, data=data)
-
-    print("STATUS:", res.status_code)
-    print("RESPONSE:", res.text)
-
-    try:
-        return res.json().get("access_token")
-    except:
-        return None
-
-
-# ================= ONBUY UPDATE =================
-def update_onbuy_product(sku, price, quantity, token):
+# ================= ONBUY UPDATE (FIXED) =================
+def update_onbuy_product(sku, price, quantity):
     try:
         url = "https://api.onbuy.com/gb/v2/products/update"
 
         headers = {
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"Basic {ONBUY_BASE64}",
             "Content-Type": "application/json"
         }
 
@@ -75,7 +53,7 @@ def update_onbuy_product(sku, price, quantity, token):
         print(f"OnBuy → {sku} → {res.status_code} → {res.text}")
 
     except Exception as e:
-        print("OnBuy update error:", e)
+        print("OnBuy error:", e)
 
 
 # ================= AMAZON =================
@@ -128,7 +106,7 @@ def get_ebay_data(url):
     try:
         from bs4 import BeautifulSoup
 
-        res = requests.get(url, headers=headers, timeout=15)
+        res = requests.get(url, headers=headers, timeout=30)
         soup = BeautifulSoup(res.text, "html.parser")
         text = soup.text.lower()
 
@@ -164,9 +142,7 @@ def get_ebay_data(url):
 
 
 # ================= MAIN =================
-onbuy_token = get_onbuy_token()
-
-for i, row in enumerate(data[:1], start=2):  # TEST WITH 1 PRODUCT
+for i, row in enumerate(data[:1], start=2):  # TEST 1 PRODUCT
 
     url = str(row.get("Supplier URL", "")).lower()
 
@@ -187,7 +163,6 @@ for i, row in enumerate(data[:1], start=2):  # TEST WITH 1 PRODUCT
         stock = row.get("Stock", 0)
 
     selling_price = round(price * 1.35, 2)
-
     status = "ACTIVE" if stock > 0 else "INACTIVE"
 
     # Update Sheet
@@ -200,14 +175,12 @@ for i, row in enumerate(data[:1], start=2):  # TEST WITH 1 PRODUCT
         datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ]])
 
-    # 🚀 ONBUY UPDATE
-    if onbuy_token:
-        update_onbuy_product(
-            sku=row.get("SKU"),
-            price=selling_price,
-            quantity=stock,
-            token=onbuy_token
-        )
+    # 🚀 ONBUY UPDATE (FIXED)
+    update_onbuy_product(
+        sku=row.get("SKU"),
+        price=selling_price,
+        quantity=stock
+    )
 
     print(f"Processed row {i}")
     time.sleep(1)
