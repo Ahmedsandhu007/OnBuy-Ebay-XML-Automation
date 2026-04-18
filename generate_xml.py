@@ -39,11 +39,14 @@ headers = {
     "Accept-Language": "en-GB,en;q=0.9"
 }
 
-# --- ASIN EXTRACT (FIXED) ---
+# --- ASIN EXTRACT (FINAL FIX) ---
 def extract_asin(url):
-    match = re.search(r"/(?:dp|gp/product)/([A-Za-z0-9]{10})", url)
+    match = re.search(
+        r"/(?:dp|gp/product|gp/aw/d)/([A-Za-z0-9]{10})",
+        url
+    )
     if match:
-        return match.group(1).upper()  # normalize
+        return match.group(1).upper()
     return None
 
 
@@ -108,7 +111,7 @@ def get_amazon_data(url):
         return None, None
 
 
-# --- EBAY ---
+# --- EBAY (IMPROVED) ---
 def get_ebay_data(url):
     try:
         from bs4 import BeautifulSoup
@@ -117,13 +120,23 @@ def get_ebay_data(url):
         soup = BeautifulSoup(res.text, "html.parser")
 
         price = None
-        price_tag = soup.select_one(".x-price-primary span")
 
-        if price_tag:
-            try:
-                price = float(price_tag.text.replace("£", "").replace(",", "").strip())
-            except:
-                pass
+        # Try multiple selectors
+        selectors = [
+            ".x-price-primary span",
+            ".ux-textspans",
+            ".notranslate"
+        ]
+
+        for sel in selectors:
+            tag = soup.select_one(sel)
+            if tag:
+                try:
+                    text = tag.text.replace("£", "").replace(",", "").strip()
+                    price = float(text)
+                    break
+                except:
+                    continue
 
         stock = 1
         if "out of stock" in soup.text.lower():
@@ -184,7 +197,7 @@ for i, row in enumerate(data, start=2):
     except Exception as e:
         print("Sheet error:", e)
 
-    # --- XML GENERATION ---
+    # --- XML ---
     if status == "ACTIVE":
         product = ET.SubElement(root, "product")
 
