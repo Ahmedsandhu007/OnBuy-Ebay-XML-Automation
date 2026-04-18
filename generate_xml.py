@@ -17,7 +17,6 @@ import os
 
 creds_dict = json.loads(os.environ["GOOGLE_CREDENTIALS"])
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-)
 
 client = gspread.authorize(creds)
 sheet = client.open("OnBuy_Feed_Master").sheet1
