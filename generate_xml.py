@@ -10,7 +10,8 @@ import random
 import xml.etree.ElementTree as ET
 
 # ================= CONFIG =================
-API_KEY = os.getenv("RAINFOREST_API_KEY")
+RAINFOREST_API_KEY = os.getenv("RAINFOREST_API_KEY")
+COUNTDOWN_API_KEY = os.getenv("COUNTDOWN_API_KEY")
 
 FEE = 0.18
 MIN_PROFIT = 0.21
@@ -42,7 +43,7 @@ def get_amazon_data(url):
             return None, None
 
         params = {
-            "api_key": API_KEY,
+            "api_key": RAINFOREST_API_KEY,
             "type": "product",
             "amazon_domain": "amazon.co.uk",
             "asin": asin
@@ -74,7 +75,7 @@ def get_amazon_data(url):
         return None, None
 
 
-# ================= EBAY (FIXED PROPERLY) =================
+# ================= EBAY (COUNTDOWN API CORRECT) =================
 def extract_ebay_id(url):
     match = re.search(r"/itm/(\d+)", url)
     return match.group(1) if match else None
@@ -85,29 +86,35 @@ def get_ebay_data(url):
         item_id = extract_ebay_id(url)
 
         if not item_id:
-            print("eBay → Invalid URL")
+            print("❌ Invalid eBay URL")
             return None, None
 
         params = {
-            "api_key": API_KEY,
+            "api_key": COUNTDOWN_API_KEY,
             "type": "product",
-            "ebay_domain": "ebay.co.uk",
+            "domain": "ebay.co.uk",
             "item_id": item_id
         }
 
-        res = requests.get("https://api.rainforestapi.com/request", params=params, timeout=20)
-        data = res.json().get("product", {})
+        res = requests.get("https://api.countdownapi.com/request", params=params, timeout=20)
+        data = res.json()
 
+        print("eBay RAW:", data)  # DEBUG (remove later)
+
+        product = data.get("product", {})
+
+        # PRICE
         price = None
-        if data.get("price"):
-            price = data["price"].get("value")
+        if product.get("price"):
+            price = product["price"].get("value")
 
-        availability = str(data.get("availability", "")).lower()
+        # STOCK (approximation)
+        availability = str(product.get("availability", "")).lower()
 
-        if "in stock" in availability:
-            stock = 5
-        elif "out of stock" in availability:
+        if "out of stock" in availability:
             stock = 0
+        elif "in stock" in availability:
+            stock = 5
         else:
             stock = 1
 
@@ -137,14 +144,14 @@ for i, row in enumerate(data, start=2):
 
     print(f"Result → Stock: {stock}, Price: {price}")
 
-    # ✅ FALLBACKS
+    # ===== FALLBACKS =====
     if price is None:
         price = row.get("Cost Price (£)", 0)
 
     if stock is None:
         stock = row.get("Stock", 0)
 
-    # 🎯 PRICING LOGIC (CORRECT)
+    # ===== PRICING =====
     profit = random.uniform(MIN_PROFIT, MAX_PROFIT)
 
     if (FEE + profit) >= 1:
@@ -154,7 +161,7 @@ for i, row in enumerate(data, start=2):
 
     status = "ACTIVE" if stock > 0 else "INACTIVE"
 
-    # ================= SHEET UPDATE =================
+    # ===== SHEET UPDATE =====
     sheet.update(range_name=f"H{i}:O{i}", values=[[
         price,
         "", "", "",
@@ -164,7 +171,7 @@ for i, row in enumerate(data, start=2):
         datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ]])
 
-    # ================= XML =================
+    # ===== XML =====
     if status == "ACTIVE":
 
         product = ET.SubElement(root, "product")
