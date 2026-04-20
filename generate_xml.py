@@ -158,12 +158,9 @@ for i, row in enumerate(data, start=2):
     # ===== PRICING (FIXED) =====
     profit = random.uniform(MIN_PROFIT, MAX_PROFIT)
 
-    if (FEE + profit) >= 0.95:
-        profit = MIN_PROFIT
+    total_markup = FEE + profit
 
-    selling_price = round(price / (1 - FEE - profit), 2)
-
-    status = "ACTIVE" if stock > 0 else "INACTIVE"
+    selling_price = round(price * (1 + total_markup), 2)
 
     # ===== SHEET UPDATE (FIXED) =====
     sheet.update(f"H{i}:O{i}", [[
