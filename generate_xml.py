@@ -52,8 +52,11 @@ def get_ebay_token():
         "scope": "https://api.ebay.com/oauth/api_scope"
     }
 
-    res = requests.post("https://api.ebay.com/identity/v1/oauth2/token",
-                        headers=headers, data=data)
+    res = requests.post(
+        "https://api.ebay.com/identity/v1/oauth2/token",
+        headers=headers,
+        data=data
+    )
 
     token = res.json().get("access_token")
 
@@ -132,8 +135,7 @@ def get_ebay_data(url, token):
     except:
         return None, None
 
-
-# ================= XML =================
+# ================= XML ROOT =================
 root = ET.Element("products")
 
 # ================= TOKEN =================
@@ -148,32 +150,32 @@ for i, row in enumerate(data, start=2):
 
     if "amazon." in url:
         stock, price = get_amazon_data(url)
+
     elif "ebay." in url:
         stock, price = get_ebay_data(url, ebay_token)
 
-    # fallback
+    # ===== FALLBACK =====
     price = price or row.get("Cost Price (£)", 0)
     stock = stock if stock is not None else row.get("Stock", 0)
 
-    # ===== PRICING (MARKUP CORRECT) =====
-       profit = random.uniform(MIN_PROFIT, MAX_PROFIT)
+    # ===== PRICING (MARKUP FIXED) =====
+    profit = random.uniform(MIN_PROFIT, MAX_PROFIT)
+    total_markup = FEE + profit
+    selling_price = round(price * (1 + total_markup), 2)
 
-       total_markup = FEE + profit
+    # ===== STATUS =====
+    status = "ACTIVE" if stock > 0 else "INACTIVE"
 
-       selling_price = round(price * (1 + total_markup), 2)
+    # ===== GOOGLE SHEET UPDATE =====
+    sheet.update(f"H{i}:O{i}", [[
+        float(price),
+        "", "", "",
+        int(stock),
+        float(selling_price),
+        status,
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ]])
 
-# ===== STATUS (MISSING FIX) =====
-       status = "ACTIVE" if stock > 0 else "INACTIVE"
-
-# ===== SHEET UPDATE (FIXED) =====
-       sheet.update(f"H{i}:O{i}", [[
-       float(price),
-       "", "", "",
-       int(stock),
-       float(selling_price),
-       status,
-       datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-]])
     # ===== XML =====
     if status == "ACTIVE":
         product = ET.SubElement(root, "product")
