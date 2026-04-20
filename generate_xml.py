@@ -18,7 +18,10 @@ EBAY_CLIENT_SECRET = os.getenv("EBAY_CLIENT_SECRET")
 FEE = 0.18
 MIN_PROFIT = 0.21
 MAX_PROFIT = 0.25
-UNDERCUT_FACTOR = 0.98   # 🔥 Buy Box strategy (2% cheaper than eBay)
+UNDERCUT_FACTOR = 0.98   # Buy Box strategy
+
+# Optional stock safety (None = disabled)
+STOCK_LIMIT = None
 
 # ================= AUTH =================
 scope = [
@@ -159,32 +162,36 @@ for i, row in enumerate(data, start=2):
     price = price or row.get("Cost Price (£)", 0)
     stock = stock if stock is not None else row.get("Stock", 0)
 
-    # ===== BUY BOX OPTIMIZED PRICING =====
+    # ===== OPTIONAL STOCK LIMIT =====
+    if STOCK_LIMIT:
+        stock = min(stock, STOCK_LIMIT)
+
+    # ===== BUY BOX PRICING =====
     profit = random.uniform(MIN_PROFIT, MAX_PROFIT)
 
-    min_price = price * (1 + FEE + profit)         # profit protection
-    competitive_price = price * UNDERCUT_FACTOR    # undercut eBay
+    min_price = price * (1 + FEE + profit)
+    competitive_price = price * UNDERCUT_FACTOR
 
     selling_price = round(max(min_price, competitive_price), 2)
 
     # psychological pricing
     selling_price = round(selling_price) - 0.01
 
-    # stock safety
-    stock = min(stock, 2)
-
     # ===== STATUS =====
     status = "ACTIVE" if stock > 0 else "INACTIVE"
 
-    # ===== GOOGLE SHEET UPDATE =====
-    sheet.update(f"H{i}:O{i}", [[
-        float(price),
-        "", "", "",
-        int(stock),
-        float(selling_price),
-        status,
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    ]])
+    # ===== GOOGLE SHEET UPDATE (FIXED) =====
+    sheet.update(
+        range_name=f"H{i}:O{i}",
+        values=[[
+            float(price),
+            "", "", "",
+            int(stock),
+            float(selling_price),
+            status,
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ]]
+    )
 
     # ===== XML =====
     if status == "ACTIVE":
