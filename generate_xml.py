@@ -37,10 +37,25 @@ client = gspread.authorize(creds)
 sheet = client.open("OnBuy_Feed_Master").sheet1
 data = sheet.get_all_records()
 
-# ================= EBAY TOKEN =================
+# ================= EBAY TOKEN (FIXED) =================
 def get_ebay_token():
-    credentials = f"{EBAY_CLIENT_ID}:{EBAY_CLIENT_SECRET}"
-    encoded = base64.b64encode(credentials.encode()).decode()
+    import requests
+    import base64
+    import os
+
+    # 🔥 STRIP to remove hidden spaces/newlines
+    client_id = os.getenv("EBAY_CLIENT_ID", "").strip()
+    client_secret = os.getenv("EBAY_CLIENT_SECRET", "").strip()
+
+    # 🚨 HARD CHECK
+    if not client_id or not client_secret:
+        raise Exception("Missing eBay credentials")
+
+    print("ID LENGTH:", len(client_id))
+    print("SECRET LENGTH:", len(client_secret))
+
+    credentials = f"{client_id}:{client_secret}"
+    encoded = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
 
     headers = {
         "Authorization": f"Basic {encoded}",
@@ -57,6 +72,8 @@ def get_ebay_token():
         headers=headers,
         data=data
     )
+
+    print("TOKEN RESPONSE:", res.text)  # 🔍 DEBUG
 
     token = res.json().get("access_token")
 
