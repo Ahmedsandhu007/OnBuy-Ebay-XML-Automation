@@ -8,10 +8,13 @@ import os
 import re
 import random
 import xml.etree.ElementTree as ET
+import base64
 
 # ================= CONFIG =================
 RAINFOREST_API_KEY = os.getenv("RAINFOREST_API_KEY")
-COUNTDOWN_API_KEY = os.getenv("COUNTDOWN_API_KEY")
+
+EBAY_CLIENT_ID = os.getenv("EBAY_CLIENT_ID")
+EBAY_CLIENT_SECRET = os.getenv("EBAY_CLIENT_SECRET")
 
 FEE = 0.18
 MIN_PROFIT = 0.21
@@ -23,12 +26,44 @@ scope = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-creds_dict = json.loads(os.environ["GOOGLE_CREDENTIALS"])
+creds_raw = os.getenv("GOOGLE_CREDENTIALS")
+if not creds_raw:
+    raise Exception("GOOGLE_CREDENTIALS missing")
+
+creds_dict = json.loads(creds_raw)
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 client = gspread.authorize(creds)
 
 sheet = client.open("OnBuy_Feed_Master").sheet1
 data = sheet.get_all_records()
+
+# ================= EBAY TOKEN =================
+def get_ebay_token():
+    credentials = f"{EBAY_CLIENT_ID}:{EBAY_CLIENT_SECRET}"
+    encoded = base64.b64encode(credentials.encode()).decode()
+
+    headers = {
+        "Authorization": f"Basic {encoded}",
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+
+    data = {
+        "grant_type": "client_credentials",
+        "scope": "https://api.ebay.com/oauth/api_scope"
+    }
+
+    res = requests.post(
+        "https://api.ebay.com/identity/v1/oauth2/token",
+        headers=headers,
+        data=data
+    )
+
+    token = res.json().get("access_token")
+
+    if not token:
+        raise Exception(f"Failed to get eBay token: {res.text}")
+
+    return token
 
 # ================= AMAZON =================
 def extract_asin(url):
@@ -75,59 +110,64 @@ def get_amazon_data(url):
         return None, None
 
 
-# ================= EBAY (COUNTDOWN API CORRECT) =================
+# ================= EBAY (OFFICIAL API) =================
 def extract_ebay_id(url):
     match = re.search(r"/itm/(\d+)", url)
     return match.group(1) if match else None
 
 
-def get_ebay_data(url):
+def get_ebay_data(url, token):
     try:
         item_id = extract_ebay_id(url)
 
         if not item_id:
-            print("❌ Invalid eBay URL")
+            print("Invalid eBay URL")
             return None, None
 
-        params = {
-            "api_key": COUNTDOWN_API_KEY,
-            "type": "product",
-            "domain": "ebay.co.uk",
-            "item_id": item_id
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-EBAY-C-MARKETPLACE-ID": "EBAY_GB"
         }
 
-        res = requests.get("https://api.countdownapi.com/request", params=params, timeout=20)
+        res = requests.get(
+            f"https://api.ebay.com/buy/browse/v1/item/v1|{item_id}|0",
+            headers=headers,
+            timeout=20
+        )
+
         data = res.json()
 
-        print("eBay RAW:", data)  # DEBUG (remove later)
-
-        product = data.get("product", {})
+        print("eBay RAW:", data)
 
         # PRICE
         price = None
-        if product.get("price"):
-            price = product["price"].get("value")
+        if data.get("price"):
+            price = float(data["price"]["value"])
 
-        # STOCK (approximation)
-        availability = str(product.get("availability", "")).lower()
+        # STOCK
+        availability = data.get("availability", {}).get("shipToLocationAvailability", {})
 
-        if "out of stock" in availability:
-            stock = 0
-        elif "in stock" in availability:
-            stock = 5
+        if availability.get("quantity"):
+            stock = availability["quantity"]
+        elif availability.get("availabilityThreshold"):
+            stock = availability["availabilityThreshold"]
         else:
             stock = 1
 
-        print(f"eBay(API) → Stock: {stock}, Price: {price}")
+        print(f"eBay(API OFFICIAL) → Stock: {stock}, Price: {price}")
+
         return stock, price
 
     except Exception as e:
-        print("eBay API error:", e)
+        print("eBay error:", e)
         return None, None
 
 
 # ================= XML ROOT =================
 root = ET.Element("products")
+
+# ================= GET TOKEN ONCE =================
+ebay_token = get_ebay_token()
 
 # ================= MAIN =================
 for i, row in enumerate(data, start=2):
@@ -140,18 +180,18 @@ for i, row in enumerate(data, start=2):
         stock, price = get_amazon_data(url)
 
     elif "ebay." in url:
-        stock, price = get_ebay_data(url)
+        stock, price = get_ebay_data(url, ebay_token)
 
     print(f"Result → Stock: {stock}, Price: {price}")
 
-    # ===== FALLBACKS =====
+    # FALLBACKS
     if price is None:
         price = row.get("Cost Price (£)", 0)
 
     if stock is None:
         stock = row.get("Stock", 0)
 
-    # ===== PRICING =====
+    # PRICING
     profit = random.uniform(MIN_PROFIT, MAX_PROFIT)
 
     if (FEE + profit) >= 1:
@@ -161,7 +201,7 @@ for i, row in enumerate(data, start=2):
 
     status = "ACTIVE" if stock > 0 else "INACTIVE"
 
-    # ===== SHEET UPDATE =====
+    # SHEET UPDATE
     sheet.update(range_name=f"H{i}:O{i}", values=[[
         price,
         "", "", "",
@@ -171,7 +211,7 @@ for i, row in enumerate(data, start=2):
         datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ]])
 
-    # ===== XML =====
+    # XML
     if status == "ACTIVE":
 
         product = ET.SubElement(root, "product")
