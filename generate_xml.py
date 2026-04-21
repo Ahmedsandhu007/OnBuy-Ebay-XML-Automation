@@ -1,7 +1,7 @@
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 import json
 import os
@@ -11,17 +11,18 @@ import xml.etree.ElementTree as ET
 import base64
 
 # ================= CONFIG =================
-RAINFOREST_API_KEY = os.getenv("RAINFOREST_API_KEY")
 EBAY_CLIENT_ID = os.getenv("EBAY_CLIENT_ID")
 EBAY_CLIENT_SECRET = os.getenv("EBAY_CLIENT_SECRET")
 
 FEE = 0.18
 MIN_PROFIT = 0.21
 MAX_PROFIT = 0.25
-UNDERCUT_FACTOR = 0.98   # Buy Box strategy
+UNDERCUT_FACTOR = 0.98
 
-# Optional stock safety (None = disabled)
-STOCK_LIMIT = None
+# 🔥 SMART LIMITER CONFIG
+TOTAL_BATCHES = 5
+SKIP_HOURS = 6
+DAILY_API_LIMIT = 4800
 
 # ================= AUTH =================
 scope = [
@@ -38,72 +39,23 @@ data = sheet.get_all_records()
 
 # ================= EBAY TOKEN =================
 def get_ebay_token():
-    client_id = os.getenv("EBAY_CLIENT_ID", "").strip()
-    client_secret = os.getenv("EBAY_CLIENT_SECRET", "").strip()
-
-    if not client_id or not client_secret:
-        raise Exception("Missing eBay credentials")
-
-    encoded = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
-
-    headers = {
-        "Authorization": f"Basic {encoded}",
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
-
-    data = {
-        "grant_type": "client_credentials",
-        "scope": "https://api.ebay.com/oauth/api_scope"
-    }
+    encoded = base64.b64encode(
+        f"{EBAY_CLIENT_ID.strip()}:{EBAY_CLIENT_SECRET.strip()}".encode()
+    ).decode()
 
     res = requests.post(
         "https://api.ebay.com/identity/v1/oauth2/token",
-        headers=headers,
-        data=data
+        headers={
+            "Authorization": f"Basic {encoded}",
+            "Content-Type": "application/x-www-form-urlencoded"
+        },
+        data={
+            "grant_type": "client_credentials",
+            "scope": "https://api.ebay.com/oauth/api_scope"
+        }
     )
 
-    token = res.json().get("access_token")
-
-    if not token:
-        raise Exception(res.text)
-
-    return token
-
-# ================= AMAZON =================
-def extract_asin(url):
-    match = re.search(r"/(?:dp|gp/product|gp/aw/d)/([A-Za-z0-9]{10})", url)
-    return match.group(1).upper() if match else None
-
-
-def get_amazon_data(url):
-    try:
-        asin = extract_asin(url)
-        if not asin:
-            return None, None
-
-        params = {
-            "api_key": RAINFOREST_API_KEY,
-            "type": "product",
-            "amazon_domain": "amazon.co.uk",
-            "asin": asin
-        }
-
-        res = requests.get("https://api.rainforestapi.com/request", params=params)
-        data = res.json().get("product", {})
-
-        price = (
-            data.get("buybox_winner", {}).get("price", {}).get("value")
-            or data.get("price", {}).get("value")
-        )
-
-        availability = data.get("availability", "").lower()
-
-        stock = 10 if "in stock" in availability else 0 if "out" in availability else 5
-
-        return stock, price
-
-    except:
-        return None, None
+    return res.json().get("access_token")
 
 # ================= EBAY =================
 def get_ebay_data(url, token):
@@ -114,14 +66,12 @@ def get_ebay_data(url, token):
 
         item_id = match.group(1)
 
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "X-EBAY-C-MARKETPLACE-ID": "EBAY_GB"
-        }
-
         res = requests.get(
             f"https://api.ebay.com/buy/browse/v1/item/v1|{item_id}|0",
-            headers=headers
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-EBAY-C-MARKETPLACE-ID": "EBAY_GB"
+            }
         )
 
         data = res.json()
@@ -130,57 +80,79 @@ def get_ebay_data(url, token):
 
         stock = 0
         avail = data.get("estimatedAvailabilities", [])
-        if avail:
-            if avail[0].get("estimatedAvailabilityStatus") == "IN_STOCK":
-                stock = avail[0].get("estimatedAvailableQuantity", 5)
+        if avail and avail[0].get("estimatedAvailabilityStatus") == "IN_STOCK":
+            stock = avail[0].get("estimatedAvailableQuantity", 5)
 
         return stock, price
 
     except:
         return None, None
 
-# ================= XML ROOT =================
+# ================= INIT =================
 root = ET.Element("products")
-
-# ================= TOKEN =================
 ebay_token = get_ebay_token()
 
+api_calls = 0
+current_hour = datetime.utcnow().hour
+batch_index = current_hour % TOTAL_BATCHES
+
 # ================= MAIN =================
-for i, row in enumerate(data, start=2):
+for idx, row in enumerate(data):
+
+    # ===== BATCH SYSTEM =====
+    if idx % TOTAL_BATCHES != batch_index:
+        continue
+
+    i = idx + 2
+
+    # ===== DAILY LIMIT =====
+    if api_calls >= DAILY_API_LIMIT:
+        print("API LIMIT REACHED — STOPPING")
+        break
+
+    # ===== LAST CHECKED SKIP =====
+    last_checked_str = row.get("Last Checked Time", "")
+
+    if last_checked_str:
+        try:
+            last_checked = datetime.strptime(last_checked_str, "%Y-%m-%d %H:%M:%S")
+
+            if datetime.now() - last_checked < timedelta(hours=SKIP_HOURS):
+                print(f"{i} | SKIPPED (recent)")
+                continue
+        except:
+            pass
 
     url = str(row.get("Supplier URL", "")).lower()
 
-    stock, price = None, None
+    # ===== EBAY CALL =====
+    stock, price = get_ebay_data(url, ebay_token)
+    api_calls += 1
 
-    if "amazon." in url:
-        stock, price = get_amazon_data(url)
-
-    elif "ebay." in url:
-        stock, price = get_ebay_data(url, ebay_token)
-
-    # ===== FALLBACK =====
+    # fallback
     price = price or row.get("Cost Price (£)", 0)
     stock = stock if stock is not None else row.get("Stock", 0)
 
-    # ===== OPTIONAL STOCK LIMIT =====
-    if STOCK_LIMIT:
-        stock = min(stock, STOCK_LIMIT)
-
-    # ===== BUY BOX PRICING =====
+    # ===== PRICING =====
     profit = random.uniform(MIN_PROFIT, MAX_PROFIT)
 
     min_price = price * (1 + FEE + profit)
     competitive_price = price * UNDERCUT_FACTOR
 
     selling_price = round(max(min_price, competitive_price), 2)
-
-    # psychological pricing
     selling_price = round(selling_price) - 0.01
 
-    # ===== STATUS =====
+    # ===== CHANGE DETECTION =====
+    old_price = float(row.get("Selling Price", 0))
+    old_stock = int(row.get("Stock", 0))
+
+    if abs(old_price - selling_price) < 0.5 and old_stock == stock:
+        print(f"{i} | NO CHANGE")
+        continue
+
     status = "ACTIVE" if stock > 0 else "INACTIVE"
 
-    # ===== GOOGLE SHEET UPDATE (FIXED) =====
+    # ===== SHEET UPDATE =====
     sheet.update(
         range_name=f"H{i}:O{i}",
         values=[[
@@ -193,25 +165,25 @@ for i, row in enumerate(data, start=2):
         ]]
     )
 
+    # ===== UPDATE LAST CHECKED (COLUMN T) =====
+    sheet.update(
+        range_name=f"T{i}",
+        values=[[datetime.now().strftime("%Y-%m-%d %H:%M:%S")]]
+    )
+
     # ===== XML =====
     if status == "ACTIVE":
         product = ET.SubElement(root, "product")
-
         ET.SubElement(product, "sku").text = str(row.get("SKU", ""))
         ET.SubElement(product, "title").text = row.get("Title", "")
-        ET.SubElement(product, "description").text = row.get("Description", "")
         ET.SubElement(product, "price").text = str(selling_price)
         ET.SubElement(product, "quantity").text = str(stock)
-        ET.SubElement(product, "brand").text = row.get("Brand", "")
-        ET.SubElement(product, "image_url").text = row.get("Image URL", "")
-        ET.SubElement(product, "category").text = row.get("Category", "")
 
-    # ===== CLEAN OUTPUT =====
     print(f"{i} | £{price} → £{selling_price} | Stock: {stock}")
 
-    time.sleep(1)
+    time.sleep(0.5)
 
 # ================= SAVE XML =================
 ET.ElementTree(root).write("feed.xml", encoding="utf-8", xml_declaration=True)
 
-print("DONE")
+print(f"DONE | API CALLS USED: {api_calls}")
