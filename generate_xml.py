@@ -14,12 +14,14 @@ import base64
 EBAY_CLIENT_ID = os.getenv("EBAY_CLIENT_ID")
 EBAY_CLIENT_SECRET = os.getenv("EBAY_CLIENT_SECRET")
 
+ONBUY_CONSUMER_KEY = os.getenv("ONBUY_CONSUMER_KEY")
+ONBUY_SECRET_KEY = os.getenv("ONBUY_SECRET_KEY")
+
 FEE = 0.18
 MIN_PROFIT = 0.21
 MAX_PROFIT = 0.25
 UNDERCUT_FACTOR = 0.98
 
-# 🔥 SMART LIMITER CONFIG
 TOTAL_BATCHES = 5
 SKIP_HOURS = 6
 DAILY_API_LIMIT = 4800
@@ -88,6 +90,35 @@ def get_ebay_data(url, token):
     except:
         return None, None
 
+# ================= ONBUY =================
+def update_onbuy_product(sku, price, quantity):
+    try:
+        url = "https://api.onbuy.com/v2/products/update"
+
+        headers = {
+            "Authorization": "Basic " + base64.b64encode(
+                f"{ONBUY_CONSUMER_KEY}:{ONBUY_SECRET_KEY}".encode()
+            ).decode(),
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "products": [
+                {
+                    "sku": str(sku),
+                    "price": float(price),
+                    "quantity": int(quantity)
+                }
+            ]
+        }
+
+        res = requests.post(url, json=payload, headers=headers)
+
+        print(f"OnBuy → {sku} → {res.status_code}")
+
+    except Exception as e:
+        print("OnBuy error:", e)
+
 # ================= INIT =================
 root = ET.Element("products")
 ebay_token = get_ebay_token()
@@ -99,18 +130,16 @@ batch_index = current_hour % TOTAL_BATCHES
 # ================= MAIN =================
 for idx, row in enumerate(data):
 
-    # ===== BATCH SYSTEM =====
     if idx % TOTAL_BATCHES != batch_index:
         continue
 
     i = idx + 2
 
-    # ===== DAILY LIMIT =====
     if api_calls >= DAILY_API_LIMIT:
         print("API LIMIT REACHED — STOPPING")
         break
 
-    # ===== LAST CHECKED SKIP =====
+    # ===== LAST CHECKED =====
     last_checked_str = row.get("Last Checked Time", "")
 
     if last_checked_str:
@@ -118,18 +147,16 @@ for idx, row in enumerate(data):
             last_checked = datetime.strptime(last_checked_str, "%Y-%m-%d %H:%M:%S")
 
             if datetime.now() - last_checked < timedelta(hours=SKIP_HOURS):
-                print(f"{i} | SKIPPED (recent)")
+                print(f"{i} | SKIPPED")
                 continue
         except:
             pass
 
     url = str(row.get("Supplier URL", "")).lower()
 
-    # ===== EBAY CALL =====
     stock, price = get_ebay_data(url, ebay_token)
     api_calls += 1
 
-    # fallback
     price = price or row.get("Cost Price (£)", 0)
     stock = stock if stock is not None else row.get("Stock", 0)
 
@@ -142,7 +169,7 @@ for idx, row in enumerate(data):
     selling_price = round(max(min_price, competitive_price), 2)
     selling_price = round(selling_price) - 0.01
 
-    # ===== CHANGE DETECTION =====
+    # ===== CHANGE CHECK =====
     old_price = float(row.get("Selling Price", 0))
     old_stock = int(row.get("Stock", 0))
 
@@ -152,7 +179,7 @@ for idx, row in enumerate(data):
 
     status = "ACTIVE" if stock > 0 else "INACTIVE"
 
-    # ===== SHEET UPDATE =====
+    # ===== SHEET =====
     sheet.update(
         range_name=f"H{i}:O{i}",
         values=[[
@@ -165,13 +192,19 @@ for idx, row in enumerate(data):
         ]]
     )
 
-    # ===== UPDATE LAST CHECKED (COLUMN T) =====
     sheet.update(
         range_name=f"T{i}",
         values=[[datetime.now().strftime("%Y-%m-%d %H:%M:%S")]]
     )
 
-    # ===== XML =====
+    # ===== ONBUY API (🔥 NEW) =====
+    update_onbuy_product(
+        sku=row.get("SKU"),
+        price=selling_price,
+        quantity=stock
+    )
+
+    # ===== XML BACKUP =====
     if status == "ACTIVE":
         product = ET.SubElement(root, "product")
         ET.SubElement(product, "sku").text = str(row.get("SKU", ""))
