@@ -2,6 +2,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import requests
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo   # ✅ NEW
 import time
 import json
 import os
@@ -25,6 +26,9 @@ UNDERCUT_FACTOR = 0.98
 TOTAL_BATCHES = 5
 SKIP_HOURS = 0
 DAILY_API_LIMIT = 4800
+
+# ✅ PAKISTAN TIMEZONE
+PK_TZ = ZoneInfo("Asia/Karachi")
 
 # ================= AUTH =================
 scope = [
@@ -124,7 +128,7 @@ root = ET.Element("products")
 ebay_token = get_ebay_token()
 
 api_calls = 0
-current_hour = datetime.utcnow().hour
+current_hour = datetime.now(PK_TZ).hour   # ✅ FIXED
 batch_index = current_hour % TOTAL_BATCHES
 
 # ================= MAIN =================
@@ -144,9 +148,11 @@ for idx, row in enumerate(data):
 
     if last_checked_str:
         try:
-            last_checked = datetime.strptime(last_checked_str, "%Y-%m-%d %H:%M:%S")
+            last_checked = datetime.strptime(
+                last_checked_str, "%Y-%m-%d %H:%M:%S"
+            ).replace(tzinfo=PK_TZ)   # ✅ FIXED
 
-            if datetime.now() - last_checked < timedelta(hours=SKIP_HOURS):
+            if datetime.now(PK_TZ) - last_checked < timedelta(hours=SKIP_HOURS):
                 print(f"{i} | SKIPPED")
                 continue
         except:
@@ -179,6 +185,8 @@ for idx, row in enumerate(data):
 
     status = "ACTIVE" if stock > 0 else "INACTIVE"
 
+    now_pk = datetime.now(PK_TZ).strftime("%Y-%m-%d %H:%M:%S")  # ✅ FIXED
+
     # ===== SHEET =====
     sheet.update(
         range_name=f"H{i}:O{i}",
@@ -188,16 +196,16 @@ for idx, row in enumerate(data):
             int(stock),
             float(selling_price),
             status,
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now_pk
         ]]
     )
 
     sheet.update(
         range_name=f"T{i}",
-        values=[[datetime.now().strftime("%Y-%m-%d %H:%M:%S")]]
+        values=[[now_pk]]
     )
 
-    # ===== ONBUY API (🔥 NEW) =====
+    # ===== ONBUY API =====
     update_onbuy_product(
         sku=row.get("SKU"),
         price=selling_price,
