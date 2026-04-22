@@ -2,7 +2,7 @@ name: Generate OnBuy Feed
 
 on:
   schedule:
-    - cron: "0 */3 * * *"   # ✅ every 3 hours
+    - cron: "0 */3 * * *"   # every 3 hours
   workflow_dispatch:
 
 jobs:
@@ -19,7 +19,9 @@ jobs:
           python-version: "3.10"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: Run script
         env:
@@ -28,6 +30,8 @@ jobs:
           EBAY_CLIENT_SECRET: ${{ secrets.EBAY_CLIENT_SECRET }}
           ONBUY_CONSUMER_KEY: ${{ secrets.ONBUY_CONSUMER_KEY }}
           ONBUY_SECRET_KEY: ${{ secrets.ONBUY_SECRET_KEY }}
+          ALI_APP_KEY: ${{ secrets.ALI_APP_KEY }}           # ✅ NEW
+          ALI_APP_SECRET: ${{ secrets.ALI_APP_SECRET }}     # ✅ NEW
         run: python generate_xml.py
 
       - name: Commit and push XML
