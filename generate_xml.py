@@ -24,7 +24,7 @@ MAX_PROFIT = 0.25
 UNDERCUT_FACTOR = 0.98
 
 TOTAL_BATCHES = 5
-SKIP_HOURS = 0
+SKIP_HOURS = 6
 DAILY_API_LIMIT = 4800
 
 PK_TZ = ZoneInfo("Asia/Karachi")
@@ -63,10 +63,44 @@ def get_ebay_token():
     return res.json().get("access_token")
 
 # ================= EBAY =================
+def get_ebay_data(url, token):
+    try:
+        match = re.search(r"/itm/(\d+)", url)
+        if not match:
+            return None, None
+
+        item_id = match.group(1)
+
+        res = requests.get(
+            f"https://api.ebay.com/buy/browse/v1/item/v1|{item_id}|0",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-EBAY-C-MARKETPLACE-ID": "EBAY_GB"
+            }
+        )
+
+        data = res.json()
+
+        price = float(data.get("price", {}).get("value", 0))
+
+        stock = 0
+        avail = data.get("estimatedAvailabilities", [])
+        if avail and avail[0].get("estimatedAvailabilityStatus") == "IN_STOCK":
+            stock = avail[0].get("estimatedAvailableQuantity", 5)
+
+        print(f"eBay → Stock: {stock}, Price: {price}")
+        return stock, price
+
+    except Exception as e:
+        print("eBay error:", e)
+        return None, None
+
+# ================= ALIEXPRESS (STABLE) =================
 def get_aliexpress_data(url):
     try:
         print("Ali URL:", url)
 
+        # Extract all encoded numbers
         matches = re.findall(r'%21([\d\.]+)%21', url)
 
         valid_prices = []
@@ -75,7 +109,7 @@ def get_aliexpress_data(url):
             try:
                 val = float(m)
 
-                # realistic product price range
+                # realistic price range filter
                 if 1.5 < val < 500:
                     valid_prices.append(val)
 
@@ -83,11 +117,10 @@ def get_aliexpress_data(url):
                 continue
 
         if valid_prices:
-            # 🔥 pick the lowest valid price (usually discounted price)
-            price = min(valid_prices)
+            price = min(valid_prices)  # safest choice
             stock = 5
 
-            print(f"AliExpress (STABLE) → Stock: {stock}, Price: {price}")
+            print(f"AliExpress → Stock: {stock}, Price: {price}")
             return stock, price
 
         print("AliExpress → No valid price found")
@@ -97,39 +130,6 @@ def get_aliexpress_data(url):
         print("AliExpress error:", e)
         return None, None
 
-# ================= ALIEXPRESS (FIXED SCRAPER) =================
-def get_aliexpress_data(url):
-    try:
-        print("Ali URL:", url)
-
-        matches = re.findall(r'%21([\d\.]+)%21', url)
-
-        # 🔥 filter only realistic prices
-        prices = []
-        for m in matches:
-            try:
-                val = float(m)
-
-                # ✅ keep only valid price range
-                if 0.5 < val < 1000:
-                    prices.append(val)
-
-            except:
-                continue
-
-        if prices:
-            price = prices[0] if len(prices) == 1 else prices[1]
-            stock = 5
-
-            print(f"AliExpress (FINAL) → Stock: {stock}, Price: {price}")
-            return stock, price
-
-        print("AliExpress → No valid price found")
-        return None, None
-
-    except Exception as e:
-        print("AliExpress error:", e)
-        return None, None
 # ================= ONBUY =================
 def update_onbuy_product(sku, price, quantity):
     try:
@@ -153,7 +153,6 @@ def update_onbuy_product(sku, price, quantity):
         }
 
         res = requests.post(url, json=payload, headers=headers)
-
         print(f"OnBuy → {sku} → {res.status_code}")
 
     except Exception as e:
@@ -170,15 +169,16 @@ batch_index = current_hour % TOTAL_BATCHES
 # ================= MAIN =================
 for idx, row in enumerate(data):
 
-    #if idx % TOTAL_BATCHES != batch_index:
-        #continue
+    if idx % TOTAL_BATCHES != batch_index:
+        continue
 
     i = idx + 2
 
     if api_calls >= DAILY_API_LIMIT:
-        print("API LIMIT REACHED — STOPPING")
+        print("API LIMIT REACHED")
         break
 
+    # ===== SKIP LOGIC =====
     last_checked_str = row.get("Last Checked Time", "")
 
     if last_checked_str:
@@ -207,7 +207,7 @@ for idx, row in enumerate(data):
     api_calls += 1
 
     # ===== FALLBACK =====
-    if not price or price == 0:
+    if not price:
         price = row.get("Cost Price (£)", 0)
 
     if stock is None:
@@ -216,10 +216,7 @@ for idx, row in enumerate(data):
     # ===== PRICING =====
     profit = random.uniform(MIN_PROFIT, MAX_PROFIT)
 
-    min_price = price * (1 + FEE + profit)
-    competitive_price = price * UNDERCUT_FACTOR
-
-    selling_price = round(max(min_price, competitive_price), 2)
+    selling_price = price * (1 + FEE + profit)
     selling_price = round(selling_price) - 0.01
 
     # ===== CHANGE CHECK =====
