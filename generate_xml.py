@@ -101,57 +101,22 @@ def get_aliexpress_data(url):
     try:
         print("Ali URL:", url)
 
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "Accept-Language": "en-GB,en;q=0.9",
-            "Referer": "https://www.aliexpress.com/",
-            "Connection": "keep-alive"
-        }
-
-        session = requests.Session()
-        res = session.get(url, headers=headers, timeout=20)
-
-        html = res.text
-
-        # 🔥 DEBUG: detect block
-        if "captcha" in html.lower() or "punish" in html.lower():
-            print("AliExpress → BLOCKED by bot protection")
-            return None, None
-
-        # 🔥 NEW METHOD: Extract price directly from HTML
-        price_match = re.search(r'"value":"([\d\.]+)"', html)
-
-        if price_match:
-            price = float(price_match.group(1))
-            stock = 5
-
-            print(f"AliExpress (FAST SCRAPE) → Stock: {stock}, Price: {price}")
-            return stock, price
-
-        # 🔥 FALLBACK JSON extraction
-        match = re.search(r'window\.__INIT_DATA__\s*=\s*({.*?});', html)
+        # 🔥 Extract price from URL (reliable trick)
+        match = re.search(r'%21([\d\.]+)%21', url)
 
         if match:
-            data = json.loads(match.group(1))
+            price = float(match.group(1))
+            stock = 5
 
-            try:
-                price = float(
-                    data["data"]["root"]["fields"]["priceModule"]["minAmount"]["value"]
-                )
-                stock = 5
+            print(f"AliExpress (URL PRICE) → Stock: {stock}, Price: {price}")
+            return stock, price
 
-                print(f"AliExpress (JSON SCRAPE) → Stock: {stock}, Price: {price}")
-                return stock, price
-            except:
-                pass
-
-        print("AliExpress → Price not found (structure changed)")
+        print("AliExpress → Price not found in URL")
         return None, None
 
     except Exception as e:
-        print("AliExpress scrape error:", e)
+        print("AliExpress error:", e)
         return None, None
-
 # ================= ONBUY =================
 def update_onbuy_product(sku, price, quantity):
     try:
