@@ -134,14 +134,14 @@ def get_aliexpress_data(url):
             return None, None
 
         params = {
-            "app_key": ALI_APP_KEY,
-            "method": "aliexpress.ds.product.get",
-            "timestamp": str(int(time.time() * 1000)),
-            "sign_method": "md5",
-            "product_id": product_id,
-            "format": "json",
-            "v": "2.0"
-        }
+          "app_key": ALI_APP_KEY,
+          "method": "aliexpress.ds.product.get",
+          "timestamp": str(int(time.time() * 1000)),
+          "sign_method": "md5",
+          "product_id": product_id,
+          "format": "json",
+          "v": "2.0"
+      }
 
         params["sign"] = generate_sign(params, ALI_APP_SECRET)
 
