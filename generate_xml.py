@@ -1,13 +1,12 @@
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 import time
 import json
 import os
 import re
-import random
 import xml.etree.ElementTree as ET
 import base64
 
@@ -18,10 +17,10 @@ EBAY_CLIENT_SECRET = os.getenv("EBAY_CLIENT_SECRET")
 ONBUY_CONSUMER_KEY = os.getenv("ONBUY_CONSUMER_KEY")
 ONBUY_SECRET_KEY = os.getenv("ONBUY_SECRET_KEY")
 
-MIN_PROFIT = 0.15   # ✅ 15% minimum
+MIN_PROFIT = 0.15      # 15% minimum profit
+PLATFORM_FEE = 0.18    # 18% OnBuy fee
 
 TOTAL_BATCHES = 5
-SKIP_HOURS = 6
 DAILY_API_LIMIT = 4800
 
 PK_TZ = ZoneInfo("Asia/Karachi")
@@ -62,19 +61,23 @@ def get_ebay_token():
 # ================= EBAY =================
 def get_ebay_data(url, token):
     try:
-        match = re.search(r"/itm/(\d+)", url)
+        match = re.search(r"/itm/(?:.*?/)?(\d{9,12})", url)
         if not match:
             return None, None
 
         item_id = match.group(1)
 
         res = requests.get(
-            f"https://api.ebay.com/buy/browse/v1/item/v1|{item_id}|0",
+            f"https://api.ebay.com/buy/browse/v1/item/{item_id}",
             headers={
                 "Authorization": f"Bearer {token}",
                 "X-EBAY-C-MARKETPLACE-ID": "EBAY_GB"
             }
         )
+
+        if res.status_code != 200:
+            print("eBay error:", res.text)
+            return None, None
 
         data = res.json()
 
@@ -85,11 +88,10 @@ def get_ebay_data(url, token):
         if avail and avail[0].get("estimatedAvailabilityStatus") == "IN_STOCK":
             stock = avail[0].get("estimatedAvailableQuantity", 5)
 
-        print(f"eBay → Stock: {stock}, Price: {price}")
         return stock, price
 
     except Exception as e:
-        print("eBay error:", e)
+        print("eBay exception:", e)
         return None, None
 
 # ================= ONBUY =================
@@ -139,7 +141,7 @@ for idx, row in enumerate(data):
     if api_calls >= DAILY_API_LIMIT:
         break
 
-    url = str(row.get("Supplier URL", "")).lower()
+    url = str(row.get("Supplier URL", "")).strip()
 
     if "ebay." not in url:
         continue
@@ -150,27 +152,31 @@ for idx, row in enumerate(data):
     if not cost_price:
         continue
 
-    # ================= NEW PRICING =================
+    # ================= CORRECT PRICING =================
 
-    # Minimum allowed price
-    min_price = cost_price * (1 + MIN_PROFIT)
+    # Minimum price (guarantees 15% profit AFTER 18% fee)
+    min_price = (cost_price * (1 + MIN_PROFIT)) / (1 - PLATFORM_FEE)
 
-    # Your current selling price from sheet
-    current_price = float(row.get("Selling Price", 0) or 0)
+    user_price = float(row.get("Selling Price", 0) or 0)
 
-    # Random boost (YOUR CONTROL RANGE)
-    boost_percent = random.uniform(0.05, 0.30)   # adjustable
+    if user_price > 0:
+        net = user_price * (1 - PLATFORM_FEE)
+        actual_profit = (net - cost_price) / cost_price
 
-    adjusted_price = current_price * (1 + boost_percent) if current_price > 0 else min_price
-
-    final_price = max(min_price, adjusted_price)
+        if actual_profit >= MIN_PROFIT:
+            final_price = user_price   # keep user's price (no limit)
+        else:
+            final_price = min_price    # enforce safe price
+    else:
+        final_price = min_price
 
     final_price = round(final_price) - 0.01
 
-    # ================= UPDATE =================
+    # ================= STATUS =================
     status = "ACTIVE" if stock > 0 else "INACTIVE"
     now_pk = datetime.now(PK_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
+    # ================= UPDATE SHEET =================
     sheet.update(
         range_name=f"H{i}:O{i}",
         values=[[
@@ -183,8 +189,7 @@ for idx, row in enumerate(data):
         ]]
     )
 
-    sheet.update(range_name=f"T{i}", values=[[now_pk]])
-
+    # ================= UPDATE ONBUY =================
     update_onbuy_product(
         sku=row.get("SKU"),
         price=final_price,
@@ -198,10 +203,15 @@ for idx, row in enumerate(data):
         ET.SubElement(product, "price").text = str(final_price)
         ET.SubElement(product, "quantity").text = str(stock)
 
-    print(f"{i} | £{cost_price} → £{final_price} | Stock: {stock}")
+    # ================= LOG =================
+    net = final_price * (1 - PLATFORM_FEE)
+    profit = net - cost_price
+
+    print(f"{i} | Cost £{cost_price} → Sell £{final_price} | Profit £{round(profit,2)} | Stock {stock}")
 
     time.sleep(0.5)
 
+# ================= SAVE XML =================
 ET.ElementTree(root).write("feed.xml", encoding="utf-8", xml_declaration=True)
 
-print(f"DONE | API CALLS USED: {api_calls}")
+print(f"\nDONE | API CALLS USED: {api_calls}")
