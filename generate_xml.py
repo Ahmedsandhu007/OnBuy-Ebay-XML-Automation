@@ -52,37 +52,6 @@ def get_ebay_token():
 
     return res.json().get("access_token")
 
-# ================= DESCRIPTION =================
-def format_description(title, brand=""):
-    desc = f"""
-{title}
-
-Product Overview:
-Experience premium quality with this carefully selected product designed for durability performance and style.
-
-Key Features:
-• High quality construction
-• Reliable performance
-• Long lasting usage
-• Excellent value for money
-• Designed for everyday use
-
-Why Choose This Product:
-• Carefully sourced product
-• Trusted quality assurance
-• Suitable for multiple use cases
-
-Condition:
-Brand New
-
-Shipping:
-Fast and secure delivery.
-"""
-    if brand:
-        desc += f"\nBrand: {brand}"
-
-    return desc.strip()
-
 # ================= CATEGORY =================
 def clean_category(cat):
     if not cat:
@@ -108,7 +77,6 @@ def get_ebay_data(url, token):
 
         data = res.json()
 
-        # ================= BASIC =================
         price = float(data.get("price", {}).get("value", 0))
         title = data.get("title", "")
         image = data.get("image", {}).get("imageUrl", "")
@@ -121,7 +89,7 @@ def get_ebay_data(url, token):
 
         category = data.get("categoryPath", "")
 
-        # ================= BRAND (REAL FIX) =================
+        # ===== BRAND FROM EBAY =====
         brand = None
 
         if data.get("brand"):
@@ -136,7 +104,7 @@ def get_ebay_data(url, token):
         if not brand:
             brand = "Unbranded"
 
-        # ================= STOCK =================
+        # ===== STOCK =====
         stock = 0
         avail = data.get("estimatedAvailabilities", [])
 
@@ -177,23 +145,22 @@ for idx, row in enumerate(data):
     if not cost_price or not extra:
         continue
 
-    # ================= DATA =================
+    # ===== DATA FROM EBAY =====
     title = extra.get("title", "")
     image = extra.get("image", "")
     additional = ", ".join(extra.get("additional", []))
     category = clean_category(extra.get("category"))
+    brand = extra.get("brand", "Unbranded").strip()
 
-    # ✅ BRAND FROM EBAY ONLY
-    brand = row.get("Brand") or extra.get("brand") or "Unbranded"
-    brand = brand.strip()
+    # ===== DESCRIPTION FROM SHEET ONLY =====
+    raw_desc = row.get("Description")
+    description = re.sub(r"<.*?>", "", str(raw_desc or "")).strip()
 
-    description = format_description(title, brand)
-
-    # ================= PRICE =================
+    # ===== PRICE =====
     min_price = (cost_price * (1 + MIN_PROFIT)) / (1 - PLATFORM_FEE)
     final_price = round(min_price) - 0.01
 
-    # ================= UPDATE SHEET =================
+    # ===== UPDATE SHEET =====
     sheet.update(f"B{i}:E{i}", [[title, description, brand, category]])
     sheet.update(f"Q{i}:R{i}", [[image, additional]])
 
@@ -208,7 +175,7 @@ for idx, row in enumerate(data):
 
     print(f"{i} → UPDATED")
 
-    # ================= XML =================
+    # ===== XML =====
     product = ET.SubElement(root, "product")
 
     ET.SubElement(product, "sku").text = str(row.get("SKU"))
@@ -230,4 +197,4 @@ for idx, row in enumerate(data):
 # ================= SAVE =================
 ET.ElementTree(root).write("feed.xml", encoding="utf-8", xml_declaration=True)
 
-print("\n✅ TEST RUN COMPLETE — ALL ROWS PROCESSED")
+print("\n✅ TEST RUN COMPLETE — CLEAN & CORRECT")
