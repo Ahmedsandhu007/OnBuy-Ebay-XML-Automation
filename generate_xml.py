@@ -58,7 +58,7 @@ def format_description(title, brand=""):
 {title}
 
 Product Overview:
-Premium quality product designed for durability performance and style.
+Experience premium quality with this carefully selected product designed for durability performance and style.
 
 Key Features:
 • High quality construction
@@ -80,6 +80,7 @@ Fast and secure delivery.
 """
     if brand:
         desc += f"\nBrand: {brand}"
+
     return desc.strip()
 
 # ================= CATEGORY =================
@@ -107,6 +108,7 @@ def get_ebay_data(url, token):
 
         data = res.json()
 
+        # ================= BASIC =================
         price = float(data.get("price", {}).get("value", 0))
         title = data.get("title", "")
         image = data.get("image", {}).get("imageUrl", "")
@@ -119,7 +121,22 @@ def get_ebay_data(url, token):
 
         category = data.get("categoryPath", "")
 
-        # ✅ FIXED STOCK LOGIC
+        # ================= BRAND (REAL FIX) =================
+        brand = None
+
+        if data.get("brand"):
+            brand = data.get("brand")
+
+        if not brand:
+            for aspect in data.get("localizedAspects", []):
+                if aspect.get("name", "").lower() == "brand":
+                    brand = aspect.get("value")
+                    break
+
+        if not brand:
+            brand = "Unbranded"
+
+        # ================= STOCK =================
         stock = 0
         avail = data.get("estimatedAvailabilities", [])
 
@@ -130,13 +147,14 @@ def get_ebay_data(url, token):
             else:
                 stock = 0
 
-        print(f"eBay → {title} | Stock: {stock}")
+        print(f"eBay → {title} | Brand: {brand} | Stock: {stock}")
 
         return stock, price, {
             "title": title,
             "image": image,
             "additional": additional_images,
-            "category": category
+            "category": category,
+            "brand": brand
         }
 
     except Exception as e:
@@ -159,20 +177,15 @@ for idx, row in enumerate(data):
     if not cost_price or not extra:
         continue
 
-    # ================= AUTO DATA =================
+    # ================= DATA =================
     title = extra.get("title", "")
     image = extra.get("image", "")
     additional = ", ".join(extra.get("additional", []))
     category = clean_category(extra.get("category"))
 
-    # ✅ FIXED BRAND LOGIC
-    brand = row.get("Brand")
-
-    if not brand:
-        words = title.split()
-        brand = words[0] if words else "Unbranded"
-
-    brand = brand.strip() if brand else "Unbranded"
+    # ✅ BRAND FROM EBAY ONLY
+    brand = row.get("Brand") or extra.get("brand") or "Unbranded"
+    brand = brand.strip()
 
     description = format_description(title, brand)
 
@@ -181,29 +194,19 @@ for idx, row in enumerate(data):
     final_price = round(min_price) - 0.01
 
     # ================= UPDATE SHEET =================
-    sheet.update(
-        range_name=f"B{i}:E{i}",
-        values=[[title, description, brand, category]]
-    )
+    sheet.update(f"B{i}:E{i}", [[title, description, brand, category]])
+    sheet.update(f"Q{i}:R{i}", [[image, additional]])
 
-    sheet.update(
-        range_name=f"Q{i}:R{i}",
-        values=[[image, additional]]
-    )
+    sheet.update(f"H{i}:O{i}", [[
+        float(cost_price),
+        "", "", "",
+        int(stock),
+        float(final_price),
+        "ACTIVE" if stock > 0 else "INACTIVE",
+        datetime.now(PK_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    ]])
 
-    sheet.update(
-        range_name=f"H{i}:O{i}",
-        values=[[
-            float(cost_price),
-            "", "", "",
-            int(stock),
-            float(final_price),
-            "ACTIVE" if stock > 0 else "INACTIVE",
-            datetime.now(PK_TZ).strftime("%Y-%m-%d %H:%M:%S")
-        ]]
-    )
-
-    print(f"{i} → FILLED")
+    print(f"{i} → UPDATED")
 
     # ================= XML =================
     product = ET.SubElement(root, "product")
