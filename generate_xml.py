@@ -56,16 +56,38 @@ def get_ebay_token():
         }
     )
 
-    return res.json().get("access_token")
+    data = res.json()
+
+    if "access_token" not in data:
+        print("❌ TOKEN ERROR:", data)
+        return None
+
+    return data["access_token"]
 
 # ================= EBAY =================
+def extract_item_id(url):
+    if not url:
+        return None
+
+    url = str(url)
+
+    # Handles all valid eBay formats
+    match = re.search(r"/itm/(?:.*?/)?(\d{9,12})", url)
+    if match:
+        return match.group(1)
+
+    return None
+
+
 def get_ebay_data(url, token):
     try:
-        match = re.search(r"/itm/(?:.*?/)?(\d{9,12})", url)
-        if not match:
+        item_id = extract_item_id(url)
+
+        if not item_id:
+            print(f"❌ Invalid eBay URL: {url}")
             return None, None
 
-        item_id = match.group(1)
+        print(f"🔎 Fetching eBay ID: {item_id}")
 
         res = requests.get(
             f"https://api.ebay.com/buy/browse/v1/item/{item_id}",
@@ -76,22 +98,30 @@ def get_ebay_data(url, token):
         )
 
         if res.status_code != 200:
-            print("eBay error:", res.text)
+            print(f"❌ API ERROR ({item_id}): {res.text}")
             return None, None
 
         data = res.json()
 
-        price = float(data.get("price", {}).get("value", 0))
+        price_data = data.get("price")
+        if not price_data:
+            print(f"❌ No price found ({item_id})")
+            return None, None
+
+        price = float(price_data.get("value", 0))
 
         stock = 0
         avail = data.get("estimatedAvailabilities", [])
-        if avail and avail[0].get("estimatedAvailabilityStatus") == "IN_STOCK":
-            stock = avail[0].get("estimatedAvailableQuantity", 5)
+        if avail:
+            if avail[0].get("estimatedAvailabilityStatus") == "IN_STOCK":
+                stock = avail[0].get("estimatedAvailableQuantity", 5)
+
+        print(f"eBay → Price: £{price} | Stock: {stock}")
 
         return stock, price
 
     except Exception as e:
-        print("eBay exception:", e)
+        print("❌ eBay exception:", e)
         return None, None
 
 # ================= ONBUY =================
@@ -120,11 +150,15 @@ def update_onbuy_product(sku, price, quantity):
         print(f"OnBuy → {sku} → {res.status_code}")
 
     except Exception as e:
-        print("OnBuy error:", e)
+        print("❌ OnBuy error:", e)
 
 # ================= INIT =================
 root = ET.Element("products")
 ebay_token = get_ebay_token()
+
+if not ebay_token:
+    print("❌ STOPPED: Token failed")
+    exit()
 
 api_calls = 0
 current_hour = datetime.now(PK_TZ).hour
@@ -143,18 +177,19 @@ for idx, row in enumerate(data):
 
     url = str(row.get("Supplier URL", "")).strip()
 
-    if "ebay." not in url:
+    if "/itm/" not in url:
+        print(f"⚠️ Skipping invalid URL: {url}")
         continue
 
     stock, cost_price = get_ebay_data(url, ebay_token)
     api_calls += 1
 
     if not cost_price:
+        print(f"❌ Failed fetch for row {i}")
         continue
 
-    # ================= CORRECT PRICING =================
+    # ================= PRICING =================
 
-    # Minimum price (guarantees 15% profit AFTER 18% fee)
     min_price = (cost_price * (1 + MIN_PROFIT)) / (1 - PLATFORM_FEE)
 
     user_price = float(row.get("Selling Price", 0) or 0)
@@ -164,9 +199,9 @@ for idx, row in enumerate(data):
         actual_profit = (net - cost_price) / cost_price
 
         if actual_profit >= MIN_PROFIT:
-            final_price = user_price   # keep user's price (no limit)
+            final_price = user_price
         else:
-            final_price = min_price    # enforce safe price
+            final_price = min_price
     else:
         final_price = min_price
 
