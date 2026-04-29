@@ -14,8 +14,6 @@ import base64
 EBAY_CLIENT_ID = os.getenv("EBAY_CLIENT_ID")
 EBAY_CLIENT_SECRET = os.getenv("EBAY_CLIENT_SECRET")
 
-API_MODE = False  # 🔴 KEEP OFF FOR NOW
-
 TOTAL_BATCHES = 5
 DAILY_API_LIMIT = 4800
 
@@ -49,6 +47,15 @@ def clean_additional_images(images):
         return ""
     imgs = [to_jpg(i.strip()) for i in str(images).split(",") if i.strip()]
     return ",".join(imgs[:5])
+
+def clean_category(cat):
+    if not cat:
+        return ""
+    cat = str(cat).replace("\n", " ").strip()
+    if "|" in cat:
+        cat = cat.split("|")[-1]
+    cat = re.sub(r"\s+", " ", cat).strip()
+    return cat
 
 # ================= EBAY TOKEN =================
 def get_ebay_token():
@@ -110,7 +117,6 @@ batch_index = current_hour % TOTAL_BATCHES
 
 for idx, row in enumerate(data):
 
-    # ✔ batching ONLY here
     if idx % TOTAL_BATCHES != batch_index:
         continue
 
@@ -134,7 +140,7 @@ for idx, row in enumerate(data):
     sheet.update(f"H{i}:O{i}", [[
         float(cost_price),
         "", "", "",
-        int(stock or 1),
+        int(stock or 0),
         float(final_price),
         "ACTIVE" if stock else "INACTIVE",
         datetime.now(PK_TZ).strftime("%Y-%m-%d %H:%M:%S")
@@ -142,47 +148,49 @@ for idx, row in enumerate(data):
 
     time.sleep(0.3)
 
-# ================= XML GENERATION (NO BATCHING) =================
+# ================= XML GENERATION (STRICT) =================
 root = ET.Element("products")
 
 count = 0
+skipped = 0
 
 for idx, row in enumerate(data):
     try:
         sku = str(row.get("SKU") or "").strip()
-        if not sku:
+        title = str(row.get("Title") or "").strip()
+        desc = str(row.get("Description") or "").strip()
+        main_image = to_jpg(str(row.get("Image URL") or "").strip())
+        brand = str(row.get("Brand") or "").strip()
+        category = clean_category(row.get("Category"))
+
+        price_raw = str(row.get("Selling Price (£)") or "0")
+        price = float(re.sub(r"[^\d.]", "", price_raw) or 0)
+
+        stock = int(row.get("Stock") or 0)
+
+        # 🔴 STRICT FILTER (ONLY COMPLETE PRODUCTS)
+        if not all([sku, title, desc, main_image, brand, category]):
+            skipped += 1
             continue
 
-        ean = sku
-
-        title = str(row.get("Title") or "No Title")[:150]
-        desc = str(row.get("Description") or "No description available")
-
-        main_image = to_jpg(str(row.get("Image URL") or ""))
-        if not main_image:
-            main_image = "https://via.placeholder.com/500"
-
-        additional_images = clean_additional_images(row.get("Additional Images"))
-
-        brand = str(row.get("Brand") or "Unbranded")
-        category = str(row.get("Category") or "Accessories")
-
-        price = float(re.sub(r"[^\d.]", "", str(row.get("Selling Price (£)") or "0")) or 9.99)
-        stock = int(row.get("Stock") or 1)
+        if price <= 0 or stock <= 0:
+            skipped += 1
+            continue
 
         product = ET.SubElement(root, "product")
 
         ET.SubElement(product, "sku").text = sku
-        ET.SubElement(product, "product_name").text = title
+        ET.SubElement(product, "product_name").text = title[:150]
         ET.SubElement(product, "description").text = desc
         ET.SubElement(product, "image_url").text = main_image
 
+        additional_images = clean_additional_images(row.get("Additional Images"))
         if additional_images:
             ET.SubElement(product, "additional_image_urls").text = additional_images
 
         ET.SubElement(product, "brand").text = brand
         ET.SubElement(product, "category").text = category
-        ET.SubElement(product, "ean").text = ean
+        ET.SubElement(product, "ean").text = sku
         ET.SubElement(product, "condition").text = "New"
         ET.SubElement(product, "price").text = str(price)
         ET.SubElement(product, "quantity").text = str(stock)
@@ -190,9 +198,11 @@ for idx, row in enumerate(data):
         count += 1
 
     except Exception as e:
-        print("Skipped:", e)
+        skipped += 1
+        print("Skipped row error:", e)
 
 ET.ElementTree(root).write("feed.xml", encoding="utf-8", xml_declaration=True)
 
-print(f"\n✅ FEED GENERATED")
+print("\n✅ FEED GENERATED")
 print(f"📦 PRODUCTS IN FEED: {count}")
+print(f"⚠ SKIPPED (INCOMPLETE): {skipped}")
