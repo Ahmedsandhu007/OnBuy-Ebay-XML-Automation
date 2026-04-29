@@ -62,12 +62,12 @@ CATEGORY_MAP = {
     "Women's Bags & Handbags": "Bags",
     "Underwear": "Clothing",
     "Knickers": "Clothing",
-    "default": "Other"
+    "default": "Accessories"
 }
 
 def map_category(raw_cat):
     if not raw_cat:
-        return "Other"
+        return "Accessories"
     clean = re.sub(r"\s+", " ", str(raw_cat)).strip()
     last = clean.split("|")[-1].strip()
     return CATEGORY_MAP.get(last, CATEGORY_MAP["default"])
@@ -85,11 +85,6 @@ def clean_additional_images(images):
         return ""
     imgs = [to_jpg(i.strip()) for i in str(images).split(",") if i.strip()]
     return ",".join(imgs[:5])
-
-# ================= EAN =================
-def get_ean(sku, idx):
-    base = str(abs(hash(sku + str(idx))))
-    return "950" + base[:10]
 
 # ================= EBAY TOKEN =================
 def get_ebay_token():
@@ -220,6 +215,13 @@ for idx, row in enumerate(data):
 for idx, row in enumerate(data):
     try:
         sku = str(row.get("SKU")).strip()
+
+        # 🔥 EAN = EXACT SKU
+        ean = sku
+
+        if not sku.isdigit():
+            continue
+
         title = str(row.get("Title")).strip()[:150]
         desc = str(row.get("Description")).strip()
 
@@ -233,9 +235,8 @@ for idx, row in enumerate(data):
         stock = int(row.get("Stock") or 0)
 
         condition = "New"
-        ean = get_ean(sku, idx)
 
-        if not all([sku, title, desc, main_image, brand, category, ean]):
+        if not all([sku, title, desc, main_image, brand, category]):
             continue
 
         if any(bad in main_image.lower() for bad in ["imgur", "alicdn", "fruugo"]):
