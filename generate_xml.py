@@ -9,15 +9,16 @@ import os
 import re
 import xml.etree.ElementTree as ET
 import base64
+import math
 
 # ================= CONFIG =================
 EBAY_CLIENT_ID = os.getenv("EBAY_CLIENT_ID")
 EBAY_CLIENT_SECRET = os.getenv("EBAY_CLIENT_SECRET")
 
-TOTAL_BATCHES = 5
-DAILY_API_LIMIT = 4800
+FULL_REFRESH = False   # 🔥 TRUE for full sync once
 
-FULL_REFRESH = True   # 🔥 TRUE for full run, then set FALSE
+MAX_PRODUCTS_PER_RUN = 8
+RUNS_PER_DAY = 24
 
 PK_TZ = ZoneInfo("Asia/Karachi")
 
@@ -34,7 +35,6 @@ client = gspread.authorize(creds)
 sheet = client.open("OnBuy_Feed_Master").sheet1
 data = sheet.get_all_records()
 
-# 🔥 HEADER MAP (SAFE UPDATES)
 headers = sheet.row_values(1)
 col_map = {col: idx + 1 for idx, col in enumerate(headers)}
 
@@ -63,11 +63,20 @@ def clean_category(cat):
     cat = re.sub(r"\s+", " ", cat).strip()
     return cat
 
-def update_cell(row_index, col_name, value):
-    if col_name in col_map:
-        sheet.update_cell(row_index, col_map[col_name], value)
+def is_different(old, new):
+    try:
+        return float(old) != float(new)
+    except:
+        return str(old).strip() != str(new).strip()
 
-# ================= EBAY TOKEN =================
+def col_letter(n):
+    result = ""
+    while n:
+        n, r = divmod(n - 1, 26)
+        result = chr(65 + r) + result
+    return result
+
+# ================= EBAY =================
 def get_ebay_token():
     encoded = base64.b64encode(
         f"{EBAY_CLIENT_ID}:{EBAY_CLIENT_SECRET}".encode()
@@ -87,7 +96,6 @@ def get_ebay_token():
 
     return res.json().get("access_token")
 
-# ================= EBAY FETCH =================
 def get_ebay_data(url, token):
     try:
         match = re.search(r"/itm/(\d+)", url)
@@ -118,124 +126,134 @@ def get_ebay_data(url, token):
     except:
         return None, None
 
-# ================= UPDATE LOOP =================
-token = get_ebay_token()
-api_calls = 0
+# ================= DYNAMIC BATCH =================
+total_products = len(data)
+
+TOTAL_BATCHES = math.ceil(total_products / MAX_PRODUCTS_PER_RUN)
+TOTAL_BATCHES = min(TOTAL_BATCHES, RUNS_PER_DAY)
 
 current_hour = datetime.now(PK_TZ).hour
 batch_index = current_hour % TOTAL_BATCHES
 
-for idx, row in enumerate(data):
+batch_size = math.ceil(total_products / TOTAL_BATCHES)
+start = batch_index * batch_size
+end = min(start + batch_size, total_products)
 
-    # 🔥 FULL / BATCH CONTROL
-    if not FULL_REFRESH:
-        if idx % TOTAL_BATCHES != batch_index:
-            continue
+print(f"🔁 Batch {batch_index+1}/{TOTAL_BATCHES} | Processing rows {start} → {end}")
 
-    if api_calls >= DAILY_API_LIMIT:
-        break
+# ================= UPDATE LOOP =================
+token = get_ebay_token()
+
+updated_count = 0
+skipped_count = 0
+
+for idx in range(start, end):
+    row = data[idx]
+    i = idx + 2
 
     url = str(row.get("Supplier URL", "")).lower()
     if "ebay." not in url:
         continue
 
     stock, cost_price = get_ebay_data(url, token)
-    api_calls += 1
-
     if not cost_price:
         continue
 
     final_price = round(cost_price * 1.4, 2)
-    i = idx + 2
 
-    # ✔ ONLY UPDATE ALLOWED FIELDS
-    update_cell(i, "Cost Price (£)", float(cost_price))
-    update_cell(i, "Stock", int(stock or 0))
-    update_cell(i, "Selling Price (£)", float(final_price))
-    update_cell(i, "Status", "ACTIVE" if stock else "INACTIVE")
-    update_cell(i, "Last Updated", datetime.now(PK_TZ).strftime("%Y-%m-%d %H:%M:%S"))
+    old_cost = row.get("Cost Price (£)") or 0
+    old_stock = row.get("Stock") or 0
+    old_price = row.get("Selling Price (£)") or 0
 
+    if not FULL_REFRESH:
+        if not (
+            is_different(old_cost, cost_price) or
+            is_different(old_stock, stock) or
+            is_different(old_price, final_price)
+        ):
+            skipped_count += 1
+            print(f"Skipped row {i}")
+            continue
+
+    # ✅ batch update (1 call per row)
+    updates = [
+        {
+            "range": f"{col_letter(col_map['Cost Price (£)'])}{i}",
+            "values": [[float(cost_price)]]
+        },
+        {
+            "range": f"{col_letter(col_map['Stock'])}{i}",
+            "values": [[int(stock or 0)]]
+        },
+        {
+            "range": f"{col_letter(col_map['Selling Price (£)'])}{i}",
+            "values": [[float(final_price)]]
+        },
+        {
+            "range": f"{col_letter(col_map['Status'])}{i}",
+            "values": [["ACTIVE" if stock else "INACTIVE"]]
+        },
+        {
+            "range": f"{col_letter(col_map['Last Updated'])}{i}",
+            "values": [[datetime.now(PK_TZ).strftime("%Y-%m-%d %H:%M:%S")]]
+        }
+    ]
+
+    sheet.batch_update(updates)
+
+    updated_count += 1
     print(f"Updated row {i}")
-    time.sleep(0.3)
+    time.sleep(0.4)
 
-# ================= XML GENERATION =================
+# ================= XML =================
 root = ET.Element("products")
 
 count = 0
-skipped = 0
-skipped_rows = []
+skipped_xml = 0
 
 for idx, row in enumerate(data):
     try:
-        i = idx + 2
-
         sku = str(row.get("SKU") or "").strip()
         title = str(row.get("Title") or "").strip()
         desc = str(row.get("Description") or "").strip()
-        main_image = to_jpg(str(row.get("Image URL") or "").strip())
+        image = to_jpg(str(row.get("Image URL") or ""))
         brand = str(row.get("Brand") or "").strip()
         category = clean_category(row.get("Category"))
 
-        price_raw = str(row.get("Selling Price (£)") or "0")
-        price = float(re.sub(r"[^\d.]", "", price_raw) or 0)
-
+        price = float(re.sub(r"[^\d.]", "", str(row.get("Selling Price (£)") or "0")) or 0)
         stock = int(row.get("Stock") or 0)
 
-        reasons = []
-
-        if not sku:
-            reasons.append("Missing SKU")
-        if not title:
-            reasons.append("Missing Title")
-        if not desc:
-            reasons.append("Missing Description")
-        if not main_image:
-            reasons.append("Missing Image")
-        if not brand:
-            reasons.append("Missing Brand")
-        if not category:
-            reasons.append("Missing Category")
-        if price <= 0:
-            reasons.append("Invalid Price")
-        if stock <= 0:
-            reasons.append("Invalid Stock")
-
-        if reasons:
-            skipped += 1
-            skipped_rows.append((i, sku, ", ".join(reasons)))
+        if not all([sku, title, desc, image, brand, category]) or price <= 0 or stock <= 0:
+            skipped_xml += 1
             continue
 
-        product = ET.SubElement(root, "product")
+        p = ET.SubElement(root, "product")
 
-        ET.SubElement(product, "sku").text = sku
-        ET.SubElement(product, "product_name").text = title[:150]
-        ET.SubElement(product, "description").text = desc
-        ET.SubElement(product, "image_url").text = main_image
+        ET.SubElement(p, "sku").text = sku
+        ET.SubElement(p, "product_name").text = title[:150]
+        ET.SubElement(p, "description").text = desc
+        ET.SubElement(p, "image_url").text = image
 
-        additional_images = clean_additional_images(row.get("Additional Images"))
-        if additional_images:
-            ET.SubElement(product, "additional_image_urls").text = additional_images
+        add_imgs = clean_additional_images(row.get("Additional Images"))
+        if add_imgs:
+            ET.SubElement(p, "additional_image_urls").text = add_imgs
 
-        ET.SubElement(product, "brand").text = brand
-        ET.SubElement(product, "category").text = category
-        ET.SubElement(product, "ean").text = sku
-        ET.SubElement(product, "condition").text = "New"
-        ET.SubElement(product, "price").text = str(price)
-        ET.SubElement(product, "quantity").text = str(stock)
+        ET.SubElement(p, "brand").text = brand
+        ET.SubElement(p, "category").text = category
+        ET.SubElement(p, "ean").text = sku
+        ET.SubElement(p, "condition").text = "New"
+        ET.SubElement(p, "price").text = str(price)
+        ET.SubElement(p, "quantity").text = str(stock)
 
         count += 1
 
-    except Exception as e:
-        skipped += 1
-        skipped_rows.append((i, "ERROR", str(e)))
+    except:
+        skipped_xml += 1
 
-# ================= SAVE =================
 ET.ElementTree(root).write("feed.xml", encoding="utf-8", xml_declaration=True)
 
-print("\n✅ FEED GENERATED")
-print(f"📦 PRODUCTS IN FEED: {count}")
-print(f"⚠ SKIPPED (INCOMPLETE): {skipped}")
-
-print("\n🔍 SKIPPED ROW DETAILS:")
-for row_info in skipped_rows[:20]:
-    print(f"Row {row_info[0]} | SKU: {row_info[1]} | Issue: {row_info[2]}")
+print("\n✅ DONE")
+print(f"📦 Updated rows: {updated_count}")
+print(f"⏭ Skipped updates: {skipped_count}")
+print(f"📦 Feed products: {count}")
+print(f"⚠ Skipped in feed: {skipped_xml}")
