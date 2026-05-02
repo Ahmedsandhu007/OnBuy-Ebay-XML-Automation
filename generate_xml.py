@@ -17,6 +17,8 @@ EBAY_CLIENT_SECRET = os.getenv("EBAY_CLIENT_SECRET")
 TOTAL_BATCHES = 5
 DAILY_API_LIMIT = 4800
 
+FULL_REFRESH = True   # 🔥 SET TRUE FOR ONE FULL RUN, THEN FALSE
+
 PK_TZ = ZoneInfo("Asia/Karachi")
 
 # ================= GOOGLE SHEET =================
@@ -108,7 +110,7 @@ def get_ebay_data(url, token):
     except:
         return None, None
 
-# ================= BATCHED UPDATE =================
+# ================= UPDATE (FULL / BATCHED) =================
 token = get_ebay_token()
 api_calls = 0
 
@@ -117,8 +119,10 @@ batch_index = current_hour % TOTAL_BATCHES
 
 for idx, row in enumerate(data):
 
-    if idx % TOTAL_BATCHES != batch_index:
-        continue
+    # 🔥 FULL REFRESH CONTROL
+    if not FULL_REFRESH:
+        if idx % TOTAL_BATCHES != batch_index:
+            continue
 
     if api_calls >= DAILY_API_LIMIT:
         break
@@ -146,9 +150,10 @@ for idx, row in enumerate(data):
         datetime.now(PK_TZ).strftime("%Y-%m-%d %H:%M:%S")
     ]])
 
+    print(f"Updated row {i}")
     time.sleep(0.3)
 
-# ================= XML GENERATION (STRICT) =================
+# ================= XML GENERATION =================
 root = ET.Element("products")
 
 count = 0
@@ -168,7 +173,7 @@ for idx, row in enumerate(data):
 
         stock = int(row.get("Stock") or 0)
 
-        # 🔴 STRICT FILTER (ONLY COMPLETE PRODUCTS)
+        # 🔴 STRICT FILTER
         if not all([sku, title, desc, main_image, brand, category]):
             skipped += 1
             continue
