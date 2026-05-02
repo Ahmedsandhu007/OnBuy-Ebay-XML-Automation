@@ -34,6 +34,10 @@ client = gspread.authorize(creds)
 sheet = client.open("OnBuy_Feed_Master").sheet1
 data = sheet.get_all_records()
 
+# 🔥 HEADER MAP (SAFE UPDATES)
+headers = sheet.row_values(1)
+col_map = {col: idx + 1 for idx, col in enumerate(headers)}
+
 print(f"📊 TOTAL ROWS IN SHEET: {len(data)}")
 
 # ================= HELPERS =================
@@ -58,6 +62,10 @@ def clean_category(cat):
         cat = cat.split("|")[-1]
     cat = re.sub(r"\s+", " ", cat).strip()
     return cat
+
+def update_cell(row_index, col_name, value):
+    if col_name in col_map:
+        sheet.update_cell(row_index, col_map[col_name], value)
 
 # ================= EBAY TOKEN =================
 def get_ebay_token():
@@ -119,6 +127,7 @@ batch_index = current_hour % TOTAL_BATCHES
 
 for idx, row in enumerate(data):
 
+    # 🔥 FULL / BATCH CONTROL
     if not FULL_REFRESH:
         if idx % TOTAL_BATCHES != batch_index:
             continue
@@ -139,17 +148,12 @@ for idx, row in enumerate(data):
     final_price = round(cost_price * 1.4, 2)
     i = idx + 2
 
-    sheet.update(
-        range_name=f"H{i}:O{i}",
-        values=[[
-            float(cost_price),
-            "", "", "",
-            int(stock or 0),
-            float(final_price),
-            "ACTIVE" if stock else "INACTIVE",
-            datetime.now(PK_TZ).strftime("%Y-%m-%d %H:%M:%S")
-        ]]
-    )
+    # ✔ ONLY UPDATE ALLOWED FIELDS
+    update_cell(i, "Cost Price (£)", float(cost_price))
+    update_cell(i, "Stock", int(stock or 0))
+    update_cell(i, "Selling Price (£)", float(final_price))
+    update_cell(i, "Status", "ACTIVE" if stock else "INACTIVE")
+    update_cell(i, "Last Updated", datetime.now(PK_TZ).strftime("%Y-%m-%d %H:%M:%S"))
 
     print(f"Updated row {i}")
     time.sleep(0.3)
