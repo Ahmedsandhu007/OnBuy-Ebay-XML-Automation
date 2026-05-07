@@ -18,6 +18,9 @@ EBAY_CLIENT_SECRET = os.getenv("EBAY_CLIENT_SECRET")
 
 FULL_REFRESH = False
 
+# 🔥 ONLY ENABLE MANUALLY WHEN NEEDED
+RUN_CATEGORY_MAPPING = False
+
 MAX_PRODUCTS_PER_RUN = 8
 RUNS_PER_DAY = 24
 
@@ -78,6 +81,11 @@ with open(
 print(
     f"📂 Loaded {len(ONBUY_CATEGORIES)} "
     f"OnBuy categories"
+)
+
+VALID_ONBUY_CATEGORIES = set(
+    cat.strip().lower()
+    for cat in ONBUY_CATEGORIES
 )
 
 # ================= HELPERS =================
@@ -156,7 +164,6 @@ def col_letter(n):
 
     return result
 
-# ================= CATEGORY MATCHER =================
 def tokenize(text):
 
     return set(
@@ -166,6 +173,14 @@ def tokenize(text):
         )
     )
 
+def is_valid_onbuy_category(category):
+
+    return (
+        str(category).strip().lower()
+        in VALID_ONBUY_CATEGORIES
+    )
+
+# ================= CATEGORY MATCHER =================
 def map_onbuy_category(
     title,
     current_category,
@@ -287,58 +302,63 @@ def get_ebay_data(url, token):
         return None, None
 
 # ================= CATEGORY AUTO-MAPPING =================
-print("\n🔄 Updating OnBuy Categories...")
+if RUN_CATEGORY_MAPPING:
 
-category_updates = 0
+    print("\n🔄 Updating OnBuy Categories...")
 
-bulk_category_updates = []
+    category_updates = 0
 
-for idx, row in enumerate(data):
+    bulk_category_updates = []
 
-    i = idx + 2
+    for idx, row in enumerate(data):
 
-    title = str(
-        row.get("Title") or ""
-    )
+        i = idx + 2
 
-    current_category = str(
-        row.get("Category") or ""
-    )
-
-    description = str(
-        row.get("Description") or ""
-    )
-
-    mapped_category = map_onbuy_category(
-        title,
-        current_category,
-        description
-    )
-
-    if mapped_category != current_category:
-
-        bulk_category_updates.append({
-            "range": f"{col_letter(col_map['Category'])}{i}",
-            "values": [[mapped_category]]
-        })
-
-        category_updates += 1
-
-        print(
-            f"Prepared category row {i}"
+        title = str(
+            row.get("Title") or ""
         )
 
-# 🔥 SINGLE BULK UPDATE
-if bulk_category_updates:
+        current_category = str(
+            row.get("Category") or ""
+        ).strip()
 
-    sheet.batch_update(
-        bulk_category_updates
+        description = str(
+            row.get("Description") or ""
+        )
+
+        # ✔ RESPECT VALID CATEGORIES
+        if is_valid_onbuy_category(current_category):
+            continue
+
+        mapped_category = map_onbuy_category(
+            title,
+            current_category,
+            description
+        )
+
+        if mapped_category != current_category:
+
+            bulk_category_updates.append({
+                "range": f"{col_letter(col_map['Category'])}{i}",
+                "values": [[mapped_category]]
+            })
+
+            category_updates += 1
+
+            print(
+                f"Prepared category row {i}"
+            )
+
+    if bulk_category_updates:
+
+        sheet.batch_update(
+            bulk_category_updates
+        )
+
+    print(
+        f"\n✅ Categories Updated: "
+        f"{category_updates}"
     )
-
-print(
-    f"\n✅ Categories Updated: "
-    f"{category_updates}"
-)
 
 # ================= DYNAMIC BATCH =================
 total_products = len(data)
@@ -641,10 +661,12 @@ ET.ElementTree(root).write(
 
 print("\n✅ DONE")
 
-print(
-    f"📂 Categories Updated: "
-    f"{category_updates}"
-)
+if RUN_CATEGORY_MAPPING:
+
+    print(
+        f"📂 Categories Updated: "
+        f"{category_updates}"
+    )
 
 print(
     f"📦 Updated rows: "
