@@ -15,13 +15,14 @@ import csv
 EBAY_CLIENT_ID = os.getenv("EBAY_CLIENT_ID")
 EBAY_CLIENT_SECRET = os.getenv("EBAY_CLIENT_SECRET")
 
-FULL_REFRESH = False
+# 🔥 FORCE FULL REFRESH
+FULL_REFRESH = True
 
 # ONLY ENABLE MANUALLY WHEN NEEDED
 RUN_CATEGORY_MAPPING = False
 
-# SMART PRIORITY LIMIT
-MAX_PRODUCTS_PER_RUN = 12
+# 🔥 PROCESS ALL PRODUCTS ONCE
+MAX_PRODUCTS_PER_RUN = 999999
 
 PK_TZ = ZoneInfo("Asia/Karachi")
 
@@ -282,11 +283,16 @@ def get_ebay_data(url, token):
 
         data = res.json()
 
-        # ENDED LISTING
-        item_end = data.get("itemEndDate")
+        buying_options = data.get(
+            "buyingOptions",
+            []
+        )
 
-        if item_end:
-            print(f"ENDED LISTING: {item_id}")
+        # 🚨 INACTIVE / REMOVED LISTING
+        if not buying_options:
+
+            print(f"INACTIVE LISTING: {item_id}")
+
             return 0, 0
 
         estimated = data.get(
@@ -294,7 +300,7 @@ def get_ebay_data(url, token):
             []
         )
 
-        # NO AVAILABILITY
+        # 🚨 NO AVAILABILITY
         if not estimated:
             return 0, 0
 
@@ -401,7 +407,7 @@ sorted_data = sorted(
 
 print(
     f"🔁 Smart Sync | "
-    f"Processing {MAX_PRODUCTS_PER_RUN} products"
+    f"Processing {len(sorted_data[:MAX_PRODUCTS_PER_RUN])} products"
 )
 
 # ================= UPDATE LOOP =================
@@ -447,64 +453,10 @@ for idx, row in sorted_data[:MAX_PRODUCTS_PER_RUN]:
             2
         )
 
-    old_cost = (
-        row.get("Cost Price (£)")
-        or 0
-    )
-
-    old_stock = (
-        row.get("Stock")
-        or 0
-    )
-
-    old_price = (
-        row.get("Selling Price (£)")
-        or 0
-    )
-
-    if not FULL_REFRESH:
-
-        if not (
-            is_different(
-                old_cost,
-                cost_price
-            )
-            or
-            is_different(
-                old_stock,
-                stock
-            )
-            or
-            is_different(
-                old_price,
-                final_price
-            )
-        ):
-
-            skipped_count += 1
-
-            print(
-                f"Skipped row {i}"
-            )
-
-            # UPDATE LAST CHECKED TIME
-            sheet.batch_update([
-                {
-                    "range": f"{col_letter(col_map['Last Checked Time'])}{i}",
-                    "values": [[
-                        datetime.now(PK_TZ).strftime(
-                            "%Y-%m-%d %H:%M:%S"
-                        )
-                    ]]
-                }
-            ])
-
-            continue
-
     updates = [
         {
             "range": f"{col_letter(col_map['Cost Price (£)'])}{i}",
-            "values": [[float(cost_price)]]
+            "values": [[float(cost_price or 0)]]
         },
         {
             "range": f"{col_letter(col_map['Stock'])}{i}",
@@ -546,7 +498,7 @@ for idx, row in sorted_data[:MAX_PRODUCTS_PER_RUN]:
 
     print(f"Updated row {i}")
 
-    time.sleep(0.4)
+    time.sleep(0.5)
 
 # ================= XML =================
 root = ET.Element("products")
