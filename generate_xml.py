@@ -15,13 +15,13 @@ import csv
 EBAY_CLIENT_ID = os.getenv("EBAY_CLIENT_ID")
 EBAY_CLIENT_SECRET = os.getenv("EBAY_CLIENT_SECRET")
 
-# 🔥 FORCE FULL REFRESH
+# 🔥 FULL REFRESH FOR ALL PRODUCTS
 FULL_REFRESH = True
 
 # ONLY ENABLE MANUALLY WHEN NEEDED
 RUN_CATEGORY_MAPPING = False
 
-# 🔥 PROCESS ALL PRODUCTS ONCE
+# 🔥 PROCESS ALL PRODUCTS
 MAX_PRODUCTS_PER_RUN = 999999
 
 PK_TZ = ZoneInfo("Asia/Karachi")
@@ -283,36 +283,32 @@ def get_ebay_data(url, token):
 
         data = res.json()
 
-        buying_options = data.get(
-            "buyingOptions",
-            []
-        )
-
-        # 🚨 INACTIVE / REMOVED LISTING
-        if not buying_options:
-
-            print(f"INACTIVE LISTING: {item_id}")
-
-            return 0, 0
-
         estimated = data.get(
             "estimatedAvailabilities",
             []
         )
 
-        # 🚨 NO AVAILABILITY
-        if not estimated:
-            return 0, 0
+        availability_status = ""
 
-        availability_status = estimated[0].get(
-            "estimatedAvailabilityStatus",
-            ""
-        )
+        if estimated:
 
-        if availability_status in [
-            "OUT_OF_STOCK",
-            "UNAVAILABLE"
-        ]:
+            availability_status = estimated[0].get(
+                "estimatedAvailabilityStatus",
+                ""
+            )
+
+        # 🚨 TRUE INACTIVE CONDITIONS
+        if (
+            not estimated
+            or
+            availability_status in [
+                "OUT_OF_STOCK",
+                "UNAVAILABLE"
+            ]
+        ):
+
+            print(f"INACTIVE LISTING: {item_id}")
+
             return 0, 0
 
         stock = estimated[0].get(
@@ -363,7 +359,6 @@ if RUN_CATEGORY_MAPPING:
             row.get("Description") or ""
         )
 
-        # RESPECT VALID CATEGORIES
         if is_valid_onbuy_category(current_category):
             continue
 
