@@ -9,7 +9,6 @@ import os
 import re
 import xml.etree.ElementTree as ET
 import base64
-import math
 import csv
 
 # ================= CONFIG =================
@@ -18,11 +17,11 @@ EBAY_CLIENT_SECRET = os.getenv("EBAY_CLIENT_SECRET")
 
 FULL_REFRESH = False
 
-# 🔥 ONLY ENABLE MANUALLY WHEN NEEDED
+# ONLY ENABLE MANUALLY WHEN NEEDED
 RUN_CATEGORY_MAPPING = False
 
-MAX_PRODUCTS_PER_RUN = 8
-RUNS_PER_DAY = 24
+# SMART PRIORITY LIMIT
+MAX_PRODUCTS_PER_RUN = 12
 
 PK_TZ = ZoneInfo("Asia/Karachi")
 
@@ -180,6 +179,17 @@ def is_valid_onbuy_category(category):
         in VALID_ONBUY_CATEGORIES
     )
 
+def parse_time(value):
+
+    try:
+        return datetime.strptime(
+            value,
+            "%Y-%m-%d %H:%M:%S"
+        )
+
+    except:
+        return datetime(2000, 1, 1)
+
 # ================= CATEGORY MATCHER =================
 def map_onbuy_category(
     title,
@@ -272,6 +282,38 @@ def get_ebay_data(url, token):
 
         data = res.json()
 
+        # ENDED LISTING
+        item_end = data.get("itemEndDate")
+
+        if item_end:
+            print(f"ENDED LISTING: {item_id}")
+            return 0, 0
+
+        estimated = data.get(
+            "estimatedAvailabilities",
+            []
+        )
+
+        # NO AVAILABILITY
+        if not estimated:
+            return 0, 0
+
+        availability_status = estimated[0].get(
+            "estimatedAvailabilityStatus",
+            ""
+        )
+
+        if availability_status in [
+            "OUT_OF_STOCK",
+            "UNAVAILABLE"
+        ]:
+            return 0, 0
+
+        stock = estimated[0].get(
+            "estimatedAvailableQuantity",
+            0
+        )
+
         price = float(
             data.get(
                 "price",
@@ -282,23 +324,12 @@ def get_ebay_data(url, token):
             )
         )
 
-        stock = 0
-
-        avail = data.get(
-            "estimatedAvailabilities",
-            []
-        )
-
-        if avail:
-
-            stock = avail[0].get(
-                "estimatedAvailableQuantity",
-                5
-            )
-
         return stock, price
 
-    except:
+    except Exception as e:
+
+        print(f"eBay fetch error: {e}")
+
         return None, None
 
 # ================= CATEGORY AUTO-MAPPING =================
@@ -326,7 +357,7 @@ if RUN_CATEGORY_MAPPING:
             row.get("Description") or ""
         )
 
-        # ✔ RESPECT VALID CATEGORIES
+        # RESPECT VALID CATEGORIES
         if is_valid_onbuy_category(current_category):
             continue
 
@@ -360,41 +391,17 @@ if RUN_CATEGORY_MAPPING:
         f"{category_updates}"
     )
 
-# ================= DYNAMIC BATCH =================
-total_products = len(data)
-
-TOTAL_BATCHES = math.ceil(
-    total_products / MAX_PRODUCTS_PER_RUN
-)
-
-TOTAL_BATCHES = min(
-    TOTAL_BATCHES,
-    RUNS_PER_DAY
-)
-
-current_hour = datetime.now(
-    PK_TZ
-).hour
-
-batch_index = (
-    current_hour % TOTAL_BATCHES
-)
-
-batch_size = math.ceil(
-    total_products / TOTAL_BATCHES
-)
-
-start = batch_index * batch_size
-
-end = min(
-    start + batch_size,
-    total_products
+# ================= SMART PRIORITY SYNC =================
+sorted_data = sorted(
+    enumerate(data),
+    key=lambda x: parse_time(
+        x[1].get("Last Checked Time", "")
+    )
 )
 
 print(
-    f"🔁 Batch {batch_index+1}/"
-    f"{TOTAL_BATCHES} | "
-    f"Processing rows {start} → {end}"
+    f"🔁 Smart Sync | "
+    f"Processing {MAX_PRODUCTS_PER_RUN} products"
 )
 
 # ================= UPDATE LOOP =================
@@ -403,9 +410,7 @@ token = get_ebay_token()
 updated_count = 0
 skipped_count = 0
 
-for idx in range(start, end):
-
-    row = data[idx]
+for idx, row in sorted_data[:MAX_PRODUCTS_PER_RUN]:
 
     i = idx + 2
 
@@ -421,13 +426,26 @@ for idx in range(start, end):
         token
     )
 
-    if not cost_price:
-        continue
+    if stock == 0:
 
-    final_price = round(
-        cost_price * 1.4,
-        2
-    )
+        final_price = 0
+
+    else:
+
+        if not cost_price:
+            continue
+
+        minimum_price = cost_price * 1.15
+
+        calculated_price = cost_price * 1.4
+
+        final_price = round(
+            max(
+                minimum_price,
+                calculated_price
+            ),
+            2
+        )
 
     old_cost = (
         row.get("Cost Price (£)")
@@ -469,6 +487,18 @@ for idx in range(start, end):
                 f"Skipped row {i}"
             )
 
+            # UPDATE LAST CHECKED TIME
+            sheet.batch_update([
+                {
+                    "range": f"{col_letter(col_map['Last Checked Time'])}{i}",
+                    "values": [[
+                        datetime.now(PK_TZ).strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        )
+                    ]]
+                }
+            ])
+
             continue
 
     updates = [
@@ -488,12 +518,20 @@ for idx in range(start, end):
             "range": f"{col_letter(col_map['Status'])}{i}",
             "values": [[
                 "ACTIVE"
-                if stock
+                if stock > 0
                 else "INACTIVE"
             ]]
         },
         {
             "range": f"{col_letter(col_map['Last Updated'])}{i}",
+            "values": [[
+                datetime.now(PK_TZ).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+            ]]
+        },
+        {
+            "range": f"{col_letter(col_map['Last Checked Time'])}{i}",
             "values": [[
                 datetime.now(PK_TZ).strftime(
                     "%Y-%m-%d %H:%M:%S"
@@ -572,8 +610,6 @@ for idx, row in enumerate(data):
                 brand,
                 category
             ])
-            or price <= 0
-            or stock <= 0
         ):
 
             skipped_xml += 1
