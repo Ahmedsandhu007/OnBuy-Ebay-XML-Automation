@@ -272,6 +272,19 @@ def get_ebay_token():
         "access_token"
     )
 
+# ================= EMPTY RESPONSE =================
+def empty_ebay_response():
+
+    return {
+        "stock": 0,
+        "price": 0,
+        "description": "",
+        "main_image": "",
+        "additional_images": "",
+        "title": "",
+        "brand": ""
+    }
+
 # ================= EBAY FETCH =================
 def get_ebay_data(url, token):
 
@@ -298,14 +311,12 @@ def get_ebay_data(url, token):
             }
         )
 
+        # ================= REMOVED =================
         if res.status_code == 404:
 
             print(f"REMOVED LISTING: {item_id}")
 
-            return {
-                "stock": 0,
-                "price": 0
-            }
+            return empty_ebay_response()
 
         data = res.json()
 
@@ -340,15 +351,15 @@ def get_ebay_data(url, token):
                 ""
             )
 
+            # ================= OUT OF STOCK =================
             if status in [
                 "OUT_OF_STOCK",
                 "UNAVAILABLE"
             ]:
 
-                return {
-                    "stock": 0,
-                    "price": 0
-                }
+                print(f"OUT OF STOCK: {item_id}")
+
+                return empty_ebay_response()
 
             stock = estimated[0].get(
                 "estimatedAvailableQuantity",
