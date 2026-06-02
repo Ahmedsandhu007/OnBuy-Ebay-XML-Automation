@@ -17,7 +17,7 @@ payload = {
     "seller_id": int(os.getenv("ONBUY_SELLER_ID")),
     "listings": [
         {
-            "sku": "TEST-001",
+            "sku": "194343045790-test",
             "price": 29.99,
             "stock": 10,
             "boost_marketing_commission": 0
