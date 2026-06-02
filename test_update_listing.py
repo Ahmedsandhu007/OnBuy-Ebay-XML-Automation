@@ -18,7 +18,7 @@ payload = {
     "listings": [
         {
             "sku": "194343045790-test",
-            "price": 29.99,
+            "price": 7.5,
             "stock": 10,
             "boost_marketing_commission": 0
         }
