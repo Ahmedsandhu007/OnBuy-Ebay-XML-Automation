@@ -49,7 +49,7 @@ payload = {
 
 <p>These Stick glue is the ideal clean, quick and accurate way of sticking paper, cardboard and photos.</p>
 
-<p>These are solvent free and PVC free therefore wash out of clothes at 30°C.</p>
+<p>These are solvent free and PVC free therefore wash out of clothes at 30C.</p>
 
 <p>Ideal for children to use as a PVC-free product certified to comply with stringent EU child safety legislation. These Stick glue is also solvent free, acid free and non-toxic.</p>
 
