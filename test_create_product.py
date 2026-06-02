@@ -41,7 +41,7 @@ payload = {
     "rrp": "7.50",
     "product_name": "4 GLUE STICK Washable Adhesives Home School Office Decorative Craft",
     "brand_name": "Krd Ltd",
-    "description": <h3>4 Glue Stick Washable Adhesives Home School Office Craft</h3>
+    "description": "" <h3>4 Glue Stick Washable Adhesives Home School Office Craft</h3>
 
 <p>Brand new 4 pack of glue sticks suitable for home, school, office and craft projects.</p>
 
@@ -68,7 +68,7 @@ payload = {
 <li>4 x Glue Sticks</li>
 </ul>
 
-<p>Please note: Product packaging may vary.</p>,
+<p>Please note: Product packaging may vary.</p>"",
     "default_image": "https://i.ebayimg.com/images/g/8L0AAOSwvIhjaOh7/s-l1600.jpg",
     "additional_images": [
         "https://i.ebayimg.com/images/g/UJIAAOSwKCZjaOiL/s-l140.jpg"
