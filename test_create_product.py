@@ -47,7 +47,7 @@ payload = {
 }
 
 response = requests.post(
-    "https://api.onbuy.com/gb/v2/products",
+    "https://api.onbuy.com/v2/products",
     json=payload,
     headers={
         "Authorization": token,
