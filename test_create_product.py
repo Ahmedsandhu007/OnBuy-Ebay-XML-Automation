@@ -41,7 +41,7 @@ payload = {
     "rrp": "7.50",
     "product_name": "4 GLUE STICK Washable Adhesives Home School Office Decorative Craft",
     "brand_name": "Krd Ltd",
-    "description": <p><strong>4 Glue Stick Washable Adhesives Home School Office Craft</strong></p>
+    "description": <strong>4 Glue Stick Washable Adhesives Home School Office Craft</strong>
 
 <p>Brand new 4 pack of glue sticks suitable for home, school, office and craft projects.</p>
 
