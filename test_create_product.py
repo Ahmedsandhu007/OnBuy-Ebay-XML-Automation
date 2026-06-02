@@ -60,8 +60,13 @@ response = requests.post(
 )
 
 print("Status:", response.status_code)
-print("Headers:", response.headers)
-print("Response:")
 print(response.text)
-print("Calling:")
-print("https://api.onbuy.com/v2/products")
+
+if response.status_code == 200:
+    data = response.json()
+
+    if "queue_id" in data:
+        print("QUEUE ID:", data["queue_id"])
+
+    if "uid" in data:
+        print("UID:", data["uid"])
