@@ -57,4 +57,8 @@ response = requests.post(
 )
 
 print("Status:", response.status_code)
+print("Headers:", response.headers)
+print("Response:")
 print(response.text)
+print("Calling:")
+print("https://api.onbuy.com/v2/products")
