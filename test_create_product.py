@@ -30,20 +30,23 @@ print("✅ Token generated")
 # --------------------------
 
 payload = {
-    "site_id": int(os.getenv("ONBUY_SITE_ID")),
-    "seller_id": int(os.getenv("ONBUY_SELLER_ID")),
-    "uid": "TEST-001",
+    "site_id": 2000,
+    "seller_id": 48948,
+    "uid": "194343045790-test",
     "published": "1",
-    "category_id": 2305,
+    "category_id": 9474,
     "product_codes": [
-        "1234567890123"
+        "5056345008268"
     ],
-    "product_name": "Test Coffee Machine",
-    "brand_name": "Test Brand",
-    "description": "<p>Test Product From API</p>",
-    "default_image": "https://upload.wikimedia.org/wikipedia/commons/3/3f/JPEG_example_flower.jpg",
-    "force_update": True,
-    "ai_content_marked": False
+    "rrp": "7.50",
+    "product_name": "4 GLUE STICK Washable Adhesives Home School Office Decorative Craft",
+    "brand_name": "Krd Ltd",
+    "description": html_description,
+    "default_image": "https://i.ebayimg.com/images/g/8L0AAOSwvIhjaOh7/s-l1600.jpg",
+    "additional_images": [
+        "https://i.ebayimg.com/images/g/UJIAAOSwKCZjaOiL/s-l140.jpg"
+    ],
+    "force_update": True
 }
 
 response = requests.post(
