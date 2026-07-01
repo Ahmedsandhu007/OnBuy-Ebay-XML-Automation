@@ -45,7 +45,18 @@ jobs:
           ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
         run: python generate_xml.py
 
-      # feed.xml is now uploaded to Supabase Storage from inside generate_xml.py
-      # (see storage.py) instead of being committed to git every run - the old
-      # "commit feed.xml every 3 hours forever" step produced 397 of this
-      # repo's ~550 commits and grew the repo without bound.
+      # feed.xml is uploaded to Supabase Storage from inside generate_xml.py
+      # (see storage.py) once SUPABASE_URL/SUPABASE_SERVICE_KEY secrets exist -
+      # that replaces the old "commit feed.xml every 3 hours forever" step,
+      # which produced 397 of this repo's ~550 commits and grew it unbounded.
+      # Until those two secrets are added, this fallback step keeps the old
+      # git-commit behavior running so the hosted feed URL never goes stale -
+      # remove this step once Supabase Storage is confirmed working.
+      - name: Commit and push XML (fallback - only runs until Supabase secrets are set)
+        if: ${{ secrets.SUPABASE_URL == '' }}
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add feed.xml
+          git commit -m "Auto update feed" || echo "No changes"
+          git push
