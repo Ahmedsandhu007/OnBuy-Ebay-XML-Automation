@@ -30,14 +30,22 @@ jobs:
           EBAY_CLIENT_SECRET: ${{ secrets.EBAY_CLIENT_SECRET }}
           ONBUY_CONSUMER_KEY: ${{ secrets.ONBUY_CONSUMER_KEY }}
           ONBUY_SECRET_KEY: ${{ secrets.ONBUY_SECRET_KEY }}
-          ALI_APP_KEY: ${{ secrets.ALI_APP_KEY }}           # ✅ NEW
-          ALI_APP_SECRET: ${{ secrets.ALI_APP_SECRET }}     # ✅ NEW
+          ONBUY_SELLER_ID: ${{ secrets.ONBUY_SELLER_ID }}
+          ONBUY_SITE_ID: ${{ secrets.ONBUY_SITE_ID }}
+          # Off until explicitly turned on - see the comment block in generate_xml.py.
+          ONBUY_API_PUSH_ENABLED: ${{ vars.ONBUY_API_PUSH_ENABLED }}
+          ONBUY_API_TEST_SKUS: ${{ vars.ONBUY_API_TEST_SKUS }}
+          ALI_APP_KEY: ${{ secrets.ALI_APP_KEY }}
+          ALI_APP_SECRET: ${{ secrets.ALI_APP_SECRET }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_FEED_BUCKET: ${{ vars.SUPABASE_FEED_BUCKET }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
+          ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
         run: python generate_xml.py
 
-      - name: Commit and push XML
-        run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          git add feed.xml
-          git commit -m "Auto update feed" || echo "No changes"
-          git push
+      # feed.xml is now uploaded to Supabase Storage from inside generate_xml.py
+      # (see storage.py) instead of being committed to git every run - the old
+      # "commit feed.xml every 3 hours forever" step produced 397 of this
+      # repo's ~550 commits and grew the repo without bound.

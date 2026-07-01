@@ -22,7 +22,7 @@ data = sheet.get_all_records()
 def get_headers():
     return {
         "Authorization": "Basic " + base64.b64encode(
-            f"{os.getenv('ONBUY_API_KEY')}:{os.getenv('ONBUY_SECRET_KEY')}".encode()
+            f"{os.getenv('ONBUY_CONSUMER_KEY')}:{os.getenv('ONBUY_SECRET_KEY')}".encode()
         ).decode(),
         "Content-Type": "application/json"
     }
