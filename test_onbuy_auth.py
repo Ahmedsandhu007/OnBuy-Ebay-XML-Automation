@@ -1,47 +1,15 @@
-import os
-import requests
+"""Manual smoke test: confirm OnBuy sandbox credentials authenticate.
 
-CONSUMER_KEY = os.getenv("ONBUY_CONSUMER_KEY")
-SECRET_KEY = os.getenv("ONBUY_SECRET_KEY")
+Runs against the sandbox (ONBUY_TEST_CONSUMER_KEY/ONBUY_TEST_SECRET_KEY), not
+the live seller account - safe to trigger anytime.
+"""
+from onbuy_client import OnBuyClient
 
-url = "https://api.onbuy.com/v2/auth/request-token"
+client = OnBuyClient(use_sandbox=True)
+ok = client.authenticate()
 
-payload = {
-    "consumer_key": CONSUMER_KEY,
-    "secret_key": SECRET_KEY
-}
-
-headers = {
-    "Content-Type": "application/x-www-form-urlencoded"
-}
-
-response = requests.post(
-    url,
-    data=payload,
-    headers=headers,
-    timeout=30
-)
-
-print("Status Code:", response.status_code)
-print("Response:")
-print(response.text)
-
-if response.status_code == 200:
-
-    token_data = response.json()
-
-    access_token = token_data.get(
-        "access_token"
-    )
-
-    print("\nSUCCESS")
-    print("Token received")
-
-    if access_token:
-        print(
-            access_token[:40] + "..."
-        )
-
+if ok:
+    print("SUCCESS")
+    print("Token received:", client._token[:40] + "...")
 else:
-
-    print("\nFAILED")
+    print("FAILED - check ONBUY_TEST_CONSUMER_KEY/ONBUY_TEST_SECRET_KEY secrets")

@@ -19,12 +19,30 @@ BASE_URL = "https://api.onbuy.com/v2"
 
 
 class OnBuyClient:
-    def __init__(self, consumer_key=None, secret_key=None, seller_id=None, site_id=None):
-        self.consumer_key = consumer_key or os.getenv("ONBUY_CONSUMER_KEY")
-        self.secret_key = secret_key or os.getenv("ONBUY_SECRET_KEY")
-        self.seller_id = int(seller_id or os.getenv("ONBUY_SELLER_ID") or 0)
-        self.site_id = int(site_id or os.getenv("ONBUY_SITE_ID") or 0)
+    def __init__(self, consumer_key=None, secret_key=None, seller_id=None, site_id=None, use_sandbox=None):
+        # OnBuy's sandbox is the same api.onbuy.com host - only the credentials
+        # differ, so this is a credential swap, not a base-URL swap.
+        if use_sandbox is None:
+            use_sandbox = os.getenv("ONBUY_USE_SANDBOX", "false").strip().lower() == "true"
+        self.use_sandbox = use_sandbox
+
+        if use_sandbox:
+            self.consumer_key = consumer_key or os.getenv("ONBUY_TEST_CONSUMER_KEY")
+            self.secret_key = secret_key or os.getenv("ONBUY_TEST_SECRET_KEY")
+            # Sandbox seller/site IDs haven't been provided separately yet -
+            # fall back to the production ones. If OnBuy issues distinct
+            # sandbox IDs later, set ONBUY_TEST_SELLER_ID/ONBUY_TEST_SITE_ID
+            # and this will pick them up automatically.
+            self.seller_id = int(seller_id or os.getenv("ONBUY_TEST_SELLER_ID") or os.getenv("ONBUY_SELLER_ID") or 0)
+            self.site_id = int(site_id or os.getenv("ONBUY_TEST_SITE_ID") or os.getenv("ONBUY_SITE_ID") or 0)
+        else:
+            self.consumer_key = consumer_key or os.getenv("ONBUY_CONSUMER_KEY")
+            self.secret_key = secret_key or os.getenv("ONBUY_SECRET_KEY")
+            self.seller_id = int(seller_id or os.getenv("ONBUY_SELLER_ID") or 0)
+            self.site_id = int(site_id or os.getenv("ONBUY_SITE_ID") or 0)
+
         self._token = None
+        logger.info("OnBuyClient initialized (sandbox=%s)", self.use_sandbox)
 
     def authenticate(self):
         """Returns True on success. Never raises - callers must check the
@@ -32,7 +50,8 @@ class OnBuyClient:
         possibly-None eBay token as if it were valid, letting a bad token
         cascade through an entire batch; this client refuses to do that."""
         if not self.consumer_key or not self.secret_key:
-            logger.error("OnBuy credentials missing (ONBUY_CONSUMER_KEY/ONBUY_SECRET_KEY)")
+            key_names = "ONBUY_TEST_CONSUMER_KEY/ONBUY_TEST_SECRET_KEY" if self.use_sandbox else "ONBUY_CONSUMER_KEY/ONBUY_SECRET_KEY"
+            logger.error("OnBuy credentials missing (%s)", key_names)
             return False
 
         def _do_auth():

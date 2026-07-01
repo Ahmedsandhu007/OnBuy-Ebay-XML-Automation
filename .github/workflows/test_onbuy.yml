@@ -21,8 +21,8 @@ jobs:
       - name: Install Requests
         run: pip install requests
 
-      - name: Test Authentication
+      - name: Test Authentication (sandbox)
         env:
-          ONBUY_CONSUMER_KEY: ${{ secrets.ONBUY_CONSUMER_KEY }}
-          ONBUY_SECRET_KEY: ${{ secrets.ONBUY_SECRET_KEY }}
+          ONBUY_TEST_CONSUMER_KEY: ${{ secrets.ONBUY_TEST_CONSUMER_KEY }}
+          ONBUY_TEST_SECRET_KEY: ${{ secrets.ONBUY_TEST_SECRET_KEY }}
         run: python test_onbuy_auth.py

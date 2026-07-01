@@ -1,38 +1,24 @@
-import os
-import requests
+"""Manual smoke test: update a listing's price/stock via OnBuy's API.
 
-# AUTH
-auth = requests.post(
-    "https://api.onbuy.com/v2/auth/request-token",
-    data={
-        "consumer_key": os.getenv("ONBUY_CONSUMER_KEY"),
-        "secret_key": os.getenv("ONBUY_SECRET_KEY")
-    }
-)
+Runs against the sandbox (ONBUY_TEST_CONSUMER_KEY/ONBUY_TEST_SECRET_KEY), not
+the live seller account - safe to trigger anytime.
+"""
+import logging
 
-token = auth.json()["access_token"]
+from onbuy_client import OnBuyClient
 
-payload = {
-    "site_id": int(os.getenv("ONBUY_SITE_ID")),
-    "seller_id": int(os.getenv("ONBUY_SELLER_ID")),
-    "listings": [
-        {
-            "sku": "194343045790-test",
-            "price": 7.5,
-            "stock": 10,
-            "boost_marketing_commission": 0
-        }
-    ]
-}
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-response = requests.put(
-    "https://api.onbuy.com/v2/listings/by-sku",
-    json=payload,
-    headers={
-        "Authorization": token,
-        "Content-Type": "application/json"
-    }
-)
+client = OnBuyClient(use_sandbox=True)
 
-print("Status:", response.status_code)
-print(response.text)
+if not client.authenticate():
+    print("FAILED to authenticate - check ONBUY_TEST_CONSUMER_KEY/ONBUY_TEST_SECRET_KEY secrets")
+    raise SystemExit(1)
+
+try:
+    result = client.update_listing(sku="194343045790-test", price=7.5, stock=10)
+except Exception as exc:
+    print("FAILED:", exc)
+    raise SystemExit(1)
+
+print("SUCCESS:", result)

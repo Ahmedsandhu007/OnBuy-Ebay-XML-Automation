@@ -35,6 +35,12 @@ jobs:
           # Off until explicitly turned on - see the comment block in generate_xml.py.
           ONBUY_API_PUSH_ENABLED: ${{ vars.ONBUY_API_PUSH_ENABLED }}
           ONBUY_API_TEST_SKUS: ${{ vars.ONBUY_API_TEST_SKUS }}
+          # Set ONBUY_USE_SANDBOX=true (as a repo Variable) to run the whole
+          # pipeline against OnBuy's sandbox account before ever touching
+          # production - see README.md for the recommended rollout order.
+          ONBUY_USE_SANDBOX: ${{ vars.ONBUY_USE_SANDBOX }}
+          ONBUY_TEST_CONSUMER_KEY: ${{ secrets.ONBUY_TEST_CONSUMER_KEY }}
+          ONBUY_TEST_SECRET_KEY: ${{ secrets.ONBUY_TEST_SECRET_KEY }}
           ALI_APP_KEY: ${{ secrets.ALI_APP_KEY }}
           ALI_APP_SECRET: ${{ secrets.ALI_APP_SECRET }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
