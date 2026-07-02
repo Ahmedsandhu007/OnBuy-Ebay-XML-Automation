@@ -1,14 +1,18 @@
 """Selling price calculation.
 
-The previous formula was `max(cost*(1+min_profit%), cost*(1+markup%))` with no
-platform fee anywhere, even though a fee is always deducted by OnBuy on the
-sale. This grosses the price up so the configured minimum profit is protected
-*after* the fee is taken out, instead of the fee silently eating into it.
+price = (cost + shipping) x (1 + platform_fee_percent/100 + min_profit_percent/100)
+
+Confirmed with the seller: platform fee and minimum profit are both simple
+additions on top of cost, not grossed up - 20% fee + 20% minimum profit means
+a flat 40% total markup over cost, applied uniformly to every product (no
+separate higher "default markup" tier). If a product's category carries a
+higher OnBuy commission than 20%, pass that category's platform_fee_percent
+in - the margin portion still never drops below MIN_PROFIT_PERCENT (20%)
+regardless of what the fee is.
 """
 
-MIN_PROFIT_PERCENT = 15
-DEFAULT_MARKUP_PERCENT = 40
-PLATFORM_FEE_PERCENT = 9  # set to your actual OnBuy commission rate for the category
+MIN_PROFIT_PERCENT = 20
+PLATFORM_FEE_PERCENT = 20  # override per call if a category's OnBuy commission differs
 
 
 def calculate_selling_price(
@@ -16,24 +20,13 @@ def calculate_selling_price(
     shipping_cost=0.0,
     *,
     min_profit_percent=MIN_PROFIT_PERCENT,
-    default_markup_percent=DEFAULT_MARKUP_PERCENT,
     platform_fee_percent=PLATFORM_FEE_PERCENT,
 ):
-    """Returns the selling price such that, after OnBuy's percentage fee is
-    deducted, at least `min_profit_percent` margin over (cost + shipping)
-    remains. shipping_cost defaults to 0 since the current sheet has no
-    shipping column yet - wire it up by passing row.get("Shipping Cost (£)").
-    """
     if cost_price <= 0:
         return 0.0
 
     total_cost = cost_price + shipping_cost
-    min_price_before_fee = total_cost * (1 + min_profit_percent / 100)
-    markup_price_before_fee = total_cost * (1 + default_markup_percent / 100)
-    base_price = max(min_price_before_fee, markup_price_before_fee)
+    effective_margin_percent = max(min_profit_percent, MIN_PROFIT_PERCENT)  # margin floor, even if a lower value is ever passed in
+    total_markup_percent = platform_fee_percent + effective_margin_percent
 
-    fee_multiplier = 1 - (platform_fee_percent / 100)
-    if fee_multiplier <= 0:
-        raise ValueError("platform_fee_percent must be less than 100")
-
-    return round(base_price / fee_multiplier, 2)
+    return round(total_cost * (1 + total_markup_percent / 100), 2)
