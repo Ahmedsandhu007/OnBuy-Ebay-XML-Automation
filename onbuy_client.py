@@ -18,6 +18,25 @@ logger = logging.getLogger("onbuy_sync")
 BASE_URL = "https://api.onbuy.com/v2"
 
 
+def _raise_on_result_error(body, sku, what):
+    """OnBuy's bulk-style endpoints (e.g. PUT /v2/listings/by-sku) return HTTP
+    200 with a top-level "success": true even when the actual per-item
+    operation failed - the real outcome is buried in body["results"][i]["error"].
+    A plain HTTP-status check (raise_for_status) cannot see this at all, which
+    is exactly how every push in earlier runs was silently failing with
+    "SKU does not exist" while being logged as a success. Check explicitly.
+    """
+    if not isinstance(body, dict):
+        return
+    results = body.get("results")
+    if not isinstance(results, list) or not results:
+        return
+    matching = [r for r in results if isinstance(r, dict) and r.get("sku") == sku]
+    target = matching[0] if matching else (results[0] if len(results) == 1 else None)
+    if isinstance(target, dict) and target.get("error"):
+        raise PermanentError(f"{what}: {target['error']}")
+
+
 class OnBuyClient:
     def __init__(self, consumer_key=None, secret_key=None, seller_id=None, site_id=None, use_sandbox=None):
         # OnBuy's sandbox is the same api.onbuy.com host - only the credentials
@@ -106,7 +125,9 @@ class OnBuyClient:
             resp = requests.post(f"{BASE_URL}/products", json=payload, headers=self._headers(), timeout=60)
             logger.info("OnBuy create_product(%s) raw response [%s]: %s", sku, resp.status_code, resp.text[:2000])
             raise_for_status(resp, what=f"onbuy create_product({sku})")
-            return resp.json()
+            body = resp.json()
+            _raise_on_result_error(body, sku, what=f"onbuy create_product({sku})")
+            return body
 
         return with_retry(_do_create, what=f"onbuy create_product({sku})", max_attempts=3)
 
@@ -121,17 +142,17 @@ class OnBuyClient:
             resp = requests.put(f"{BASE_URL}/listings/by-sku", json=payload, headers=self._headers(), timeout=60)
             logger.info("OnBuy update_listing(%s) raw response [%s]: %s", sku, resp.status_code, resp.text[:2000])
             raise_for_status(resp, what=f"onbuy update_listing({sku})")
-            return resp.json()
+            body = resp.json()
+            _raise_on_result_error(body, sku, what=f"onbuy update_listing({sku})")
+            return body
 
         return with_retry(_do_update, what=f"onbuy update_listing({sku})", max_attempts=3)
 
     def sync_product(self, **kwargs):
         """Update price/stock for an existing SKU; if OnBuy reports the SKU
-        doesn't exist yet (a permanent 4xx on the update call), create it
-        instead. OnBuy's exact "SKU not found" response hasn't been observed
-        against a real unknown SKU yet - verify this fallback the first time
-        a genuinely new SKU goes through ONBUY_API_PUSH_ENABLED before trusting
-        it at full-catalog scale.
+        doesn't exist ("SKU does not exist", returned as HTTP 200 with the
+        real error buried in results[].error - see _raise_on_result_error),
+        create it instead.
         """
         sku, price, stock = kwargs["sku"], kwargs["price"], kwargs["stock"]
         try:
