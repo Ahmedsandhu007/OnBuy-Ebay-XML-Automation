@@ -158,7 +158,12 @@ class OnBuyClient:
         sandbox data, so this is the sole ground truth for sandbox testing.
         """
         def _do_list():
-            resp = requests.get(f"{BASE_URL}/listings", headers=self._headers(), timeout=30)
+            resp = requests.get(
+                f"{BASE_URL}/listings",
+                headers=self._headers(),
+                params={"site_id": self.site_id},
+                timeout=30,
+            )
             logger.info("OnBuy list_listings raw response [%s]: %s", resp.status_code, resp.text[:3000])
             raise_for_status(resp, what="onbuy list_listings")
             return resp.json()
