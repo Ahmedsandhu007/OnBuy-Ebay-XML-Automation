@@ -104,6 +104,7 @@ class OnBuyClient:
 
         def _do_create():
             resp = requests.post(f"{BASE_URL}/products", json=payload, headers=self._headers(), timeout=60)
+            logger.info("OnBuy create_product(%s) raw response [%s]: %s", sku, resp.status_code, resp.text[:2000])
             raise_for_status(resp, what=f"onbuy create_product({sku})")
             return resp.json()
 
@@ -118,6 +119,7 @@ class OnBuyClient:
 
         def _do_update():
             resp = requests.put(f"{BASE_URL}/listings/by-sku", json=payload, headers=self._headers(), timeout=60)
+            logger.info("OnBuy update_listing(%s) raw response [%s]: %s", sku, resp.status_code, resp.text[:2000])
             raise_for_status(resp, what=f"onbuy update_listing({sku})")
             return resp.json()
 
