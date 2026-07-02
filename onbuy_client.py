@@ -150,6 +150,21 @@ class OnBuyClient:
 
         return with_retry(_do_update, what=f"onbuy update_listing({sku})", max_attempts=3)
 
+    def list_listings(self):
+        """GET /v2/listings - the only direct way to see what's actually in
+        this account's catalog via the API. Needed because OnBuy's seller
+        dashboard only ever shows the production catalog, even when
+        authenticated with sandbox credentials - there is no visible UI for
+        sandbox data, so this is the sole ground truth for sandbox testing.
+        """
+        def _do_list():
+            resp = requests.get(f"{BASE_URL}/listings", headers=self._headers(), timeout=30)
+            logger.info("OnBuy list_listings raw response [%s]: %s", resp.status_code, resp.text[:3000])
+            raise_for_status(resp, what="onbuy list_listings")
+            return resp.json()
+
+        return with_retry(_do_list, what="onbuy list_listings", max_attempts=3)
+
     def sync_product(self, **kwargs):
         """Update price/stock for an existing SKU; if OnBuy reports the SKU
         doesn't exist ("SKU does not exist", returned as HTTP 200 with the
