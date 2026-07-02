@@ -147,6 +147,57 @@ def get_ebay_token():
         return None
 
 
+ITEM_GROUP_ERROR_ID = 11006  # "The legacy Id is invalid... use get_items_by_item_group"
+
+
+def _is_item_group_error(resp):
+    try:
+        errors = resp.json().get("errors", [])
+    except ValueError:
+        return False
+    return any(e.get("errorId") == ITEM_GROUP_ERROR_ID for e in errors)
+
+
+def _fetch_item_group_as_item(item_group_id, token):
+    """Some eBay listings are multi-variation ("item group") listings - e.g.
+    a listing with size/color options - which get_item_by_legacy_id rejects
+    with errorId 11006, pointing at this endpoint instead. Picks the first
+    variation as a representative item and reshapes the response so the rest
+    of get_ebay_data's parsing works unchanged. If your SKU is meant to track
+    a *specific* variation rather than "whichever eBay lists first", check the
+    chosen item_id logged below against what you expect.
+    """
+    resp = requests.get(
+        "https://api.ebay.com/buy/browse/v1/item/get_items_by_item_group",
+        headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY_GB"},
+        params={"item_group_id": item_group_id},
+        timeout=20,
+    )
+    raise_for_status(resp, what=f"ebay item group {item_group_id}")
+    group_data = resp.json()
+
+    items = group_data.get("items", [])
+    if not items:
+        return None
+
+    chosen = items[0]
+    logger.info(
+        "Item %s is a multi-variation listing - using variation %s",
+        item_group_id,
+        chosen.get("legacyItemId") or chosen.get("itemId"),
+    )
+
+    description = chosen.get("description")
+    if not description:
+        for common in group_data.get("commonDescriptions", []):
+            if chosen.get("itemId") in common.get("itemIds", []):
+                description = common.get("description", "")
+                break
+    chosen["description"] = description or ""
+
+    return chosen
+
+
 # ================= EBAY FETCH =================
 def get_ebay_data(url, token):
     """Returns (available, data). available=False with empty_ebay_response()
@@ -172,6 +223,8 @@ def get_ebay_data(url, token):
         )
         if resp.status_code == 404:
             return None  # confirmed removed - a real signal, not an error
+        if resp.status_code == 400 and _is_item_group_error(resp):
+            return _fetch_item_group_as_item(item_id, token)
         raise_for_status(resp, what=f"ebay item {item_id}")
         return resp.json()
 
