@@ -376,6 +376,17 @@ def main():
     else:
         sorted_data = sorted(enumerate(data), key=lambda x: parse_time(x[1].get("Last Checked Time", "")))
 
+    # While testing the OnBuy API push against a specific SKU allowlist, move
+    # those SKUs to the front of the queue - otherwise a manual test run can
+    # easily land on a batch that doesn't include any of them (oldest-checked
+    # rows win by default), making it look like the push silently did nothing
+    # when really it just never got a chance to run.
+    if ONBUY_API_PUSH_ENABLED and ONBUY_API_TEST_SKUS:
+        sorted_data = sorted(
+            sorted_data,
+            key=lambda x: str(x[1].get("SKU") or "").strip() not in ONBUY_API_TEST_SKUS,
+        )
+
     logger.info("Processing %d products", min(len(sorted_data), MAX_PRODUCTS_PER_RUN))
 
     # ================= MAIN UPDATE LOOP =================
