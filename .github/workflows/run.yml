@@ -8,6 +8,10 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # Job-level so the "if:" condition below can read it via the env context -
+      # the secrets context is not a recognized named-value inside if: expressions.
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
 
     steps:
       - name: Checkout repo
@@ -43,7 +47,6 @@ jobs:
           ONBUY_TEST_SECRET_KEY: ${{ secrets.ONBUY_TEST_SECRET_KEY }}
           ALI_APP_KEY: ${{ secrets.ALI_APP_KEY }}
           ALI_APP_SECRET: ${{ secrets.ALI_APP_SECRET }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           SUPABASE_FEED_BUCKET: ${{ vars.SUPABASE_FEED_BUCKET }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
@@ -59,7 +62,7 @@ jobs:
       # git-commit behavior running so the hosted feed URL never goes stale -
       # remove this step once Supabase Storage is confirmed working.
       - name: Commit and push XML (fallback - only runs until Supabase secrets are set)
-        if: ${{ secrets.SUPABASE_URL == '' }}
+        if: ${{ env.SUPABASE_URL == '' }}
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
