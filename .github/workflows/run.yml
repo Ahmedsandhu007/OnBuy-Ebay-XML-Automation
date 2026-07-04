@@ -45,6 +45,11 @@ jobs:
           ONBUY_USE_SANDBOX: ${{ vars.ONBUY_USE_SANDBOX }}
           ONBUY_TEST_CONSUMER_KEY: ${{ secrets.ONBUY_TEST_CONSUMER_KEY }}
           ONBUY_TEST_SECRET_KEY: ${{ secrets.ONBUY_TEST_SECRET_KEY }}
+          # Batch size scales automatically from these two - see the comment
+          # in generate_xml.py. RUNS_PER_DAY must match the cron above.
+          EBAY_DAILY_CALL_BUDGET: ${{ vars.EBAY_DAILY_CALL_BUDGET }}
+          RUNS_PER_DAY: ${{ vars.RUNS_PER_DAY }}
+          MAX_PRODUCTS_PER_RUN: ${{ vars.MAX_PRODUCTS_PER_RUN }}
           ALI_APP_KEY: ${{ secrets.ALI_APP_KEY }}
           ALI_APP_SECRET: ${{ secrets.ALI_APP_SECRET }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}

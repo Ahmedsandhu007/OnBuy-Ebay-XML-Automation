@@ -18,7 +18,7 @@ def upload_feed(local_path="feed.xml", remote_path="feed.xml"):
     the Sheet + OnBuy API updates (if enabled) already happened."""
     supabase_url = os.getenv("SUPABASE_URL")
     service_key = os.getenv("SUPABASE_SERVICE_KEY")
-    bucket = os.getenv("SUPABASE_FEED_BUCKET", "onbuy-feeds")
+    bucket = os.getenv("SUPABASE_FEED_BUCKET") or "onbuy-feeds"
 
     if not supabase_url or not service_key:
         logger.warning("SUPABASE_URL/SUPABASE_SERVICE_KEY not set - feed.xml stays local only this run")

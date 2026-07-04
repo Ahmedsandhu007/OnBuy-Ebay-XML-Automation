@@ -194,6 +194,25 @@ class OnBuyClient:
 
         return with_retry(_do_check, what=f"onbuy check_queue({queue_id})", max_attempts=3)
 
+    def list_queue(self, limit=50, offset=0):
+        """GET /v2/queues, paginated - in practice the queue_id param above
+        didn't filter results (every queue_id tested returned the same recent
+        history), so this is the more reliable way to scan for a specific
+        SKU's outcome: page through recent submissions and match by "uid"
+        (which is the SKU). Used by backfill_onbuy_status.py.
+        """
+        def _do_list():
+            resp = requests.get(
+                f"{BASE_URL}/queues",
+                headers=self._headers(),
+                params={"site_id": self.site_id, "limit": limit, "offset": offset},
+                timeout=30,
+            )
+            raise_for_status(resp, what=f"onbuy list_queue(offset={offset})")
+            return resp.json()
+
+        return with_retry(_do_list, what=f"onbuy list_queue(offset={offset})", max_attempts=3)
+
     def sync_product(self, **kwargs):
         """Update price/stock for an existing SKU; if OnBuy reports the SKU
         doesn't exist ("SKU does not exist", returned as HTTP 200 with the

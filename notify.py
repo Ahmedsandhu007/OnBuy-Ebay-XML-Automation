@@ -13,8 +13,8 @@ logger = logging.getLogger("onbuy_sync")
 
 
 def send_alert_email(subject, body):
-    host = os.getenv("SMTP_HOST", "smtp.gmail.com")
-    port = int(os.getenv("SMTP_PORT", "465"))
+    host = os.getenv("SMTP_HOST") or "smtp.gmail.com"
+    port = int(os.getenv("SMTP_PORT") or "465")
     user = os.getenv("SMTP_USER")
     app_password = os.getenv("SMTP_APP_PASSWORD")
     to_addr = os.getenv("ALERT_EMAIL_TO", user)

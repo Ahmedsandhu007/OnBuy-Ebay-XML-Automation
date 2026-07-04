@@ -40,12 +40,32 @@ EBAY_CLIENT_SECRET = os.getenv("EBAY_CLIENT_SECRET")
 # FALSE = SMART BATCHING
 FULL_REFRESH = False
 
-# AFTER FIRST FULL FETCH
-# CHANGE TO 12 OR 20
-MAX_PRODUCTS_PER_RUN = 12
-
 # CATEGORY REMAP
 RUN_CATEGORY_MAPPING = True
+
+# ================= SCALING: DYNAMIC BATCH SIZE =================
+# Batch size is computed per run from the actual row count and this daily
+# eBay API budget, instead of a fixed number - see main() below. Stay
+# comfortably under eBay's rate limit (commonly ~5,000/day on the default
+# Browse API tier - check your exact allowance in the eBay Developer Portal
+# and adjust this if yours differs).
+EBAY_DAILY_CALL_BUDGET = int(os.getenv("EBAY_DAILY_CALL_BUDGET") or "4000")
+
+# How many times this workflow runs per day - keep in sync with the cron
+# schedule in .github/workflows/run.yml (currently every 3 hours = 8/day).
+RUNS_PER_DAY = int(os.getenv("RUNS_PER_DAY") or "8")
+
+# Optional hard override: set this env var to force a fixed batch size
+# instead of the budget-derived one.
+_MAX_PRODUCTS_PER_RUN_OVERRIDE = os.getenv("MAX_PRODUCTS_PER_RUN")
+
+# ================= PRICE CHECK FLAG THRESHOLDS =================
+# Total margin % over cost (the default formula gives ~40% = 20% fee + 20%
+# profit). Normal = at/near default, Medium = moderately above, High = well
+# above - adjust these two numbers if "a little more"/"much more" should mean
+# different percentages than this.
+PRICE_CHECK_NORMAL_MAX_PCT = 45
+PRICE_CHECK_MEDIUM_MAX_PCT = 70
 
 # ================= ONBUY API PUSH (safety-gated) =================
 # Off by default: this pipeline previously only ever produced feed.xml for
@@ -88,6 +108,28 @@ def parse_time(value):
         return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
     except Exception:
         return datetime(2000, 1, 1)
+
+
+_RED = {"red": 0.96, "green": 0.8, "blue": 0.8}
+_WHITE = {"red": 1, "green": 1, "blue": 1}
+
+
+def row_highlight_request(sheet_id, row_index, num_cols, active):
+    """Sheets API repeatCell request: red background for an inactive
+    (stock=0) row, cleared back to white when it's active again."""
+    return {
+        "repeatCell": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": row_index - 1,
+                "endRowIndex": row_index,
+                "startColumnIndex": 0,
+                "endColumnIndex": num_cols,
+            },
+            "cell": {"userEnteredFormat": {"backgroundColor": _WHITE if active else _RED}},
+            "fields": "userEnteredFormat.backgroundColor",
+        }
+    }
 
 
 def tokenize(text):
@@ -332,6 +374,24 @@ def main():
 
     logger.info("TOTAL ROWS IN SHEET: %d", len(data))
 
+    # ================= DYNAMIC BATCH SIZE =================
+    # Sized from the actual row count and the eBay daily call budget, so the
+    # same code scales from a 150-row catalog to a 5,000-row one without
+    # needing a manual reconfiguration each time it grows - see the comment
+    # on EBAY_DAILY_CALL_BUDGET/RUNS_PER_DAY above.
+    if _MAX_PRODUCTS_PER_RUN_OVERRIDE:
+        MAX_PRODUCTS_PER_RUN = max(1, int(_MAX_PRODUCTS_PER_RUN_OVERRIDE))
+    else:
+        MAX_PRODUCTS_PER_RUN = max(1, EBAY_DAILY_CALL_BUDGET // RUNS_PER_DAY)
+
+    cycle_runs = -(-len(data) // MAX_PRODUCTS_PER_RUN) if data else 0  # ceil division
+    cycle_days = cycle_runs / RUNS_PER_DAY if RUNS_PER_DAY else 0
+    logger.info(
+        "Batch size: %d products/run (budget %d eBay calls/day over %d runs/day) "
+        "- a full refresh cycle over %d rows takes ~%.1f day(s)",
+        MAX_PRODUCTS_PER_RUN, EBAY_DAILY_CALL_BUDGET, RUNS_PER_DAY, len(data), cycle_days,
+    )
+
     # ================= CATEGORY FILE =================
     onbuy_categories = []
     category_id_by_path = {}
@@ -438,9 +498,12 @@ def main():
         sys.exit(1)
 
     updated_count = 0
-    onbuy_pushed = 0
+    onbuy_created = 0
+    onbuy_updated = 0
     onbuy_failed = 0
     supabase_rows = []
+    highlight_requests = []
+    num_cols = len(headers)
 
     for idx, row in sorted_data[:MAX_PRODUCTS_PER_RUN]:
         i = idx + 2
@@ -460,17 +523,13 @@ def main():
         stock = ebay_data["stock"]
         cost_price = ebay_data["price"]
 
-        # ================= SKU (auto-assigned if the employee only pasted the URL) =================
+        # ================= SKU (must be entered manually - OnBuy requires unique
+        # SKUs, and two different sourcing links can share the same barcode/item
+        # ID, so auto-deriving one risks a collision between two real products) ==
         sku = str(row.get("SKU") or "").strip()
-        sku_needs_write = False
         if not sku:
-            sku = str(ebay_data.get("product_code") or "").strip()
-            if sku:
-                sku_needs_write = True
-                logger.info("Row %d: no SKU provided, auto-assigned %s", i, sku)
-            else:
-                logger.warning("Row %d: no SKU provided and could not derive one from %s - skipping", i, url)
-                continue
+            logger.warning("Row %d: no SKU provided (OnBuy requires a unique SKU per product) - skipping until one is added", i)
+            continue
 
         # ================= CATEGORY (re-checked here with fresh title/description so a
         # brand-new row gets categorized on this same pass, not just the upfront
@@ -485,42 +544,40 @@ def main():
         category_id = category_id_by_path.get(category.strip().lower())
 
         # ================= PRICING =================
+        # Default margin is a floor, not a fixed price: if a product's price
+        # already implies more than the default 40% total margin (20% fee +
+        # 20% profit), leave it alone - only bump prices UP that currently
+        # imply less than the default, never silently lower a price someone
+        # deliberately set higher.
         shipping_cost = float(row.get("Shipping Cost (£)") or 0)
-        selling_price = 0 if stock == 0 else pricing.calculate_selling_price(cost_price, shipping_cost)
+        formula_price = pricing.calculate_selling_price(cost_price, shipping_cost)
+        existing_price = float(row.get("Selling Price (£)") or 0)
+        selling_price = 0 if stock == 0 else max(existing_price, formula_price)
+
+        # ================= PRICE CHECK FLAG =================
+        # Normal = at/near the default margin, Medium = moderately above it,
+        # High = well above it. Thresholds are a judgment call on "a little
+        # more" / "much more" - adjust PRICE_CHECK_MEDIUM_MAX_PCT /
+        # PRICE_CHECK_HIGH_MIN_PCT below if these don't match what you meant.
+        if stock == 0 or cost_price <= 0:
+            price_check_flag = ""
+        else:
+            margin_pct = (selling_price - cost_price) / cost_price * 100
+            if margin_pct <= PRICE_CHECK_NORMAL_MAX_PCT:
+                price_check_flag = "Normal"
+            elif margin_pct <= PRICE_CHECK_MEDIUM_MAX_PCT:
+                price_check_flag = "Medium"
+            else:
+                price_check_flag = "High"
 
         additional_images_str = ",".join(ebay_data["additional_images"])
         now_str = datetime.now(PK_TZ).strftime("%Y-%m-%d %H:%M:%S")
-
-        updates = [
-            {"range": f"{col_letter(col_map['Cost Price (£)'])}{i}", "values": [[cost_price]]},
-            {"range": f"{col_letter(col_map['Stock'])}{i}", "values": [[stock]]},
-            {"range": f"{col_letter(col_map['Selling Price (£)'])}{i}", "values": [[selling_price]]},
-            {"range": f"{col_letter(col_map['Status'])}{i}", "values": [["ACTIVE" if stock > 0 else "INACTIVE"]]},
-            {"range": f"{col_letter(col_map['Description'])}{i}", "values": [[ebay_data["description"]]]},
-            {"range": f"{col_letter(col_map['Image URL'])}{i}", "values": [[ebay_data["main_image"]]]},
-            {"range": f"{col_letter(col_map['Additional Images'])}{i}", "values": [[additional_images_str]]},
-            {"range": f"{col_letter(col_map['Brand'])}{i}", "values": [[ebay_data["brand"]]]},
-            {"range": f"{col_letter(col_map['Title'])}{i}", "values": [[ebay_data["title"]]]},
-            {"range": f"{col_letter(col_map['Last Updated'])}{i}", "values": [[now_str]]},
-            {"range": f"{col_letter(col_map['Last Checked Time'])}{i}", "values": [[now_str]]},
-        ]
-        if sku_needs_write:
-            updates.append({"range": f"{col_letter(col_map['SKU'])}{i}", "values": [[sku]]})
-        if category_needs_write:
-            updates.append({"range": f"{col_letter(col_map['Category'])}{i}", "values": [[category]]})
-
-        try:
-            with_retry(sheet.batch_update, updates, what=f"sheet update row {i}", max_attempts=3)
-        except Exception as exc:
-            run_had_errors = True
-            logger.error("Row %d: sheet update failed after retries, skipping - %s", i, exc)
-            continue
-
-        updated_count += 1
-        logger.info("Updated row %d", i)
-        time.sleep(0.5)  # keep the Sheets API write rate gentle, as the original pipeline did
+        is_active = stock > 0
 
         # ================= ONBUY API PUSH (gated, see ONBUY_API_PUSH_ENABLED) =================
+        # Runs before the sheet write below so the outcome (Sync Status, OPC
+        # placeholder, etc.) can go into the SAME batch_update call instead of
+        # a second Sheets API round-trip per row.
         ean = ebay_data.get("product_code") or sku
         sync_status = None
         onbuy_product_created = None
@@ -542,10 +599,10 @@ def main():
                     main_image=ebay_data["main_image"],
                     additional_images=ebay_data["additional_images"],
                 )
-                onbuy_pushed += 1
                 logger.info("OnBuy %s: %s", action, sku)
                 last_onbuy_sync = now_str
                 if action == "created":
+                    onbuy_created += 1
                     # Accepted into OnBuy's async approval queue - not confirmed live yet.
                     # The real OPC/approval status only appears later via
                     # OnBuyClient.check_queue(); this pipeline doesn't poll for it, so
@@ -555,6 +612,7 @@ def main():
                     onbuy_listing_active = "FALSE"
                     onbuy_product_id = str(result.get("queue_id", "")) if isinstance(result, dict) else ""
                 else:
+                    onbuy_updated += 1
                     sync_status = "Synced"
                     onbuy_product_created = "TRUE"
                     onbuy_listing_active = "TRUE"
@@ -563,6 +621,51 @@ def main():
                 run_had_errors = True
                 sync_status = "Failed"
                 logger.error("OnBuy push failed for SKU %s: %s", sku, exc)
+
+        updates = [
+            {"range": f"{col_letter(col_map['Cost Price (£)'])}{i}", "values": [[cost_price]]},
+            {"range": f"{col_letter(col_map['Stock'])}{i}", "values": [[stock]]},
+            {"range": f"{col_letter(col_map['Selling Price (£)'])}{i}", "values": [[selling_price]]},
+            {"range": f"{col_letter(col_map['Status'])}{i}", "values": [["ACTIVE" if is_active else "INACTIVE"]]},
+            {"range": f"{col_letter(col_map['Description'])}{i}", "values": [[ebay_data["description"]]]},
+            {"range": f"{col_letter(col_map['Image URL'])}{i}", "values": [[ebay_data["main_image"]]]},
+            {"range": f"{col_letter(col_map['Additional Images'])}{i}", "values": [[additional_images_str]]},
+            {"range": f"{col_letter(col_map['Brand'])}{i}", "values": [[ebay_data["brand"]]]},
+            {"range": f"{col_letter(col_map['Title'])}{i}", "values": [[ebay_data["title"]]]},
+            {"range": f"{col_letter(col_map['Last Updated'])}{i}", "values": [[now_str]]},
+            {"range": f"{col_letter(col_map['Last Checked Time'])}{i}", "values": [[now_str]]},
+        ]
+        if category_needs_write:
+            updates.append({"range": f"{col_letter(col_map['Category'])}{i}", "values": [[category]]})
+        if "Price Check Flag" in col_map:
+            updates.append({"range": f"{col_letter(col_map['Price Check Flag'])}{i}", "values": [[price_check_flag]]})
+        if "EAN" in col_map:
+            updates.append({"range": f"{col_letter(col_map['EAN'])}{i}", "values": [[ean]]})
+        # OnBuy-provided tracking fields, written to the Sheet only if those
+        # columns exist there and only when a push actually happened this run
+        # - otherwise leaving them out preserves whatever was already there.
+        if sync_status and "Sync Status" in col_map:
+            updates.append({"range": f"{col_letter(col_map['Sync Status'])}{i}", "values": [[sync_status]]})
+        if onbuy_product_created and "OnBuy Product Created" in col_map:
+            updates.append({"range": f"{col_letter(col_map['OnBuy Product Created'])}{i}", "values": [[onbuy_product_created]]})
+        if onbuy_listing_active and "OnBuy Listing Active" in col_map:
+            updates.append({"range": f"{col_letter(col_map['OnBuy Listing Active'])}{i}", "values": [[onbuy_listing_active]]})
+        if onbuy_product_id and "OnBuy Product ID" in col_map:
+            updates.append({"range": f"{col_letter(col_map['OnBuy Product ID'])}{i}", "values": [[onbuy_product_id]]})
+        if last_onbuy_sync and "Last OnBuy Sync" in col_map:
+            updates.append({"range": f"{col_letter(col_map['Last OnBuy Sync'])}{i}", "values": [[last_onbuy_sync]]})
+
+        try:
+            with_retry(sheet.batch_update, updates, what=f"sheet update row {i}", max_attempts=3)
+        except Exception as exc:
+            run_had_errors = True
+            logger.error("Row %d: sheet update failed after retries, skipping - %s", i, exc)
+            continue
+
+        updated_count += 1
+        logger.info("Updated row %d", i)
+        highlight_requests.append(row_highlight_request(sheet.id, i, num_cols, is_active))
+        time.sleep(0.5)  # keep the Sheets API write rate gentle, as the original pipeline did
 
         # ================= SUPABASE EXPORT ROW (upserted once after the loop) =================
         supabase_row = {
@@ -613,6 +716,17 @@ def main():
 
     supabase_ok = supabase_db.upsert_products(supabase_rows)
 
+    if highlight_requests:
+        try:
+            with_retry(
+                sheet.spreadsheet.batch_update,
+                {"requests": highlight_requests},
+                what="row highlight formatting",
+                max_attempts=3,
+            )
+        except Exception as exc:
+            logger.error("Row highlighting failed (values were still updated correctly): %s", exc)
+
     # ================= GENERATE XML (kept as fallback) =================
     root = ET.Element("products")
     feed_count = 0
@@ -660,7 +774,7 @@ def main():
     # ================= FINAL LOGS + ALERTS =================
     logger.info("DONE")
     logger.info("Updated rows: %d", updated_count)
-    logger.info("OnBuy API pushed: %d, failed: %d", onbuy_pushed, onbuy_failed)
+    logger.info("OnBuy: %d created, %d updated, %d failed", onbuy_created, onbuy_updated, onbuy_failed)
     logger.info("Feed products: %d, skipped: %d", feed_count, skipped_feed)
     logger.info("Feed URL: %s", feed_url or "(not uploaded - see SUPABASE_URL/SUPABASE_SERVICE_KEY)")
     logger.info("Supabase database export: %s (%d rows)", "OK" if supabase_ok else "skipped/failed", len(supabase_rows))
@@ -669,7 +783,7 @@ def main():
         notify.send_alert_email(
             "Sync run finished with errors",
             f"eBay fetch failures: {fetch_failures}\n"
-            f"OnBuy push failures: {onbuy_failed}\n"
+            f"OnBuy push failures: {onbuy_failed} (created {onbuy_created}, updated {onbuy_updated})\n"
             f"Updated rows: {updated_count}\n"
             f"Feed products: {feed_count}, skipped: {skipped_feed}\n"
             "Check the GitHub Actions run log for details.",
