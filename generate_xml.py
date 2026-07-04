@@ -17,6 +17,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import notify
 import pricing
 import storage
+import supabase_db
 from onbuy_client import OnBuyClient
 from retry_utils import AuthError, PermanentError, TransientError, raise_for_status, with_retry
 from sanitize import sanitize_description, validate_images
@@ -119,6 +120,7 @@ def empty_ebay_response(item_id=""):
         "title": "",
         "brand": "",
         "product_code": item_id,
+        "condition": "",
     }
 
 
@@ -298,6 +300,7 @@ def get_ebay_data(url, token):
             brand = values[0] if isinstance(values, list) else values
 
     product_code = extract_product_code(data, fallback=item_id)
+    condition = data.get("condition") or "New"
 
     return True, {
         "stock": stock,
@@ -308,6 +311,7 @@ def get_ebay_data(url, token):
         "title": title,
         "brand": brand,
         "product_code": product_code,
+        "condition": condition,
     }
 
 
@@ -380,6 +384,11 @@ def main():
             logger.error("ONBUY_API_PUSH_ENABLED is true but OnBuy authentication failed - skipping all OnBuy API pushes this run")
 
     # ================= CATEGORY MAPPING =================
+    # Cheap full-catalog pass (no eBay calls) for rows that already have a
+    # Title/Description from a previous run. A brand-new row (employee only
+    # pasted the URL) still has blank Title/Description at this point, so it
+    # can't be mapped yet here - the main loop below re-checks category using
+    # the freshly-fetched eBay data for exactly that case.
     if RUN_CATEGORY_MAPPING:
         logger.info("Updating categories...")
         category_updates = []
@@ -431,6 +440,7 @@ def main():
     updated_count = 0
     onbuy_pushed = 0
     onbuy_failed = 0
+    supabase_rows = []
 
     for idx, row in sorted_data[:MAX_PRODUCTS_PER_RUN]:
         i = idx + 2
@@ -462,11 +472,24 @@ def main():
                 logger.warning("Row %d: no SKU provided and could not derive one from %s - skipping", i, url)
                 continue
 
+        # ================= CATEGORY (re-checked here with fresh title/description so a
+        # brand-new row gets categorized on this same pass, not just the upfront
+        # full-catalog remap above, which ran before this row's eBay data existed) ====
+        current_category = str(row.get("Category") or "").strip()
+        if is_valid_onbuy_category(current_category):
+            category = current_category
+            category_needs_write = False
+        else:
+            category = map_onbuy_category(ebay_data["title"], current_category, ebay_data["description"])
+            category_needs_write = category != current_category
+        category_id = category_id_by_path.get(category.strip().lower())
+
         # ================= PRICING =================
         shipping_cost = float(row.get("Shipping Cost (£)") or 0)
         selling_price = 0 if stock == 0 else pricing.calculate_selling_price(cost_price, shipping_cost)
 
         additional_images_str = ",".join(ebay_data["additional_images"])
+        now_str = datetime.now(PK_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
         updates = [
             {"range": f"{col_letter(col_map['Cost Price (£)'])}{i}", "values": [[cost_price]]},
@@ -478,11 +501,13 @@ def main():
             {"range": f"{col_letter(col_map['Additional Images'])}{i}", "values": [[additional_images_str]]},
             {"range": f"{col_letter(col_map['Brand'])}{i}", "values": [[ebay_data["brand"]]]},
             {"range": f"{col_letter(col_map['Title'])}{i}", "values": [[ebay_data["title"]]]},
-            {"range": f"{col_letter(col_map['Last Updated'])}{i}", "values": [[datetime.now(PK_TZ).strftime("%Y-%m-%d %H:%M:%S")]]},
-            {"range": f"{col_letter(col_map['Last Checked Time'])}{i}", "values": [[datetime.now(PK_TZ).strftime("%Y-%m-%d %H:%M:%S")]]},
+            {"range": f"{col_letter(col_map['Last Updated'])}{i}", "values": [[now_str]]},
+            {"range": f"{col_letter(col_map['Last Checked Time'])}{i}", "values": [[now_str]]},
         ]
         if sku_needs_write:
             updates.append({"range": f"{col_letter(col_map['SKU'])}{i}", "values": [[sku]]})
+        if category_needs_write:
+            updates.append({"range": f"{col_letter(col_map['Category'])}{i}", "values": [[category]]})
 
         try:
             with_retry(sheet.batch_update, updates, what=f"sheet update row {i}", max_attempts=3)
@@ -496,13 +521,18 @@ def main():
         time.sleep(0.5)  # keep the Sheets API write rate gentle, as the original pipeline did
 
         # ================= ONBUY API PUSH (gated, see ONBUY_API_PUSH_ENABLED) =================
+        ean = ebay_data.get("product_code") or sku
+        sync_status = None
+        onbuy_product_created = None
+        onbuy_listing_active = None
+        onbuy_product_id = None
+        last_onbuy_sync = None
+
         if sku and onbuy_ready and should_push_to_onbuy(sku):
             try:
-                category_path = clean_category(row.get("Category"))
-                category_id = category_id_by_path.get(category_path.strip().lower())
-                action, _ = onbuy.sync_product(
+                action, result = onbuy.sync_product(
                     sku=sku,
-                    ean=sku,  # no separate EAN is captured from eBay yet - same placeholder the old XML feed used
+                    ean=ean,
                     title=ebay_data["title"] or str(row.get("Title") or ""),
                     description=ebay_data["description"],
                     brand=ebay_data["brand"],
@@ -514,10 +544,74 @@ def main():
                 )
                 onbuy_pushed += 1
                 logger.info("OnBuy %s: %s", action, sku)
+                last_onbuy_sync = now_str
+                if action == "created":
+                    # Accepted into OnBuy's async approval queue - not confirmed live yet.
+                    # The real OPC/approval status only appears later via
+                    # OnBuyClient.check_queue(); this pipeline doesn't poll for it, so
+                    # these reflect "submitted", not "confirmed active".
+                    sync_status = "Pending Approval"
+                    onbuy_product_created = "TRUE"
+                    onbuy_listing_active = "FALSE"
+                    onbuy_product_id = str(result.get("queue_id", "")) if isinstance(result, dict) else ""
+                else:
+                    sync_status = "Synced"
+                    onbuy_product_created = "TRUE"
+                    onbuy_listing_active = "TRUE"
             except Exception as exc:
                 onbuy_failed += 1
                 run_had_errors = True
+                sync_status = "Failed"
                 logger.error("OnBuy push failed for SKU %s: %s", sku, exc)
+
+        # ================= SUPABASE EXPORT ROW (upserted once after the loop) =================
+        supabase_row = {
+            "SKU": sku,
+            "Title": ebay_data["title"] or str(row.get("Title") or ""),
+            "Description": ebay_data["description"],
+            "Brand": ebay_data["brand"],
+            "Category": category,
+            "Category ID": str(category_id) if category_id is not None else None,
+            "Supplier URL": url,
+            "Supplier": "eBay",
+            "Cost Price (£)": cost_price,
+            "Shipping Cost (£)": str(shipping_cost) if shipping_cost else None,
+            "Profit %": str(pricing.MIN_PROFIT_PERCENT),
+            "Fee %": str(pricing.PLATFORM_FEE_PERCENT),
+            "Stock": stock,
+            "Selling Price (£)": selling_price,
+            "Status": "ACTIVE" if stock > 0 else "INACTIVE",
+            "Last Updated": datetime.now(PK_TZ).isoformat(),
+            "Image URL": ebay_data["main_image"],
+            "Additional Images": additional_images_str,
+            "Condition": ebay_data.get("condition") or "New",
+            "Last Checked Time": datetime.now(PK_TZ).isoformat(),
+            "EAN": ean,
+            # OPC (OnBuy's permanent product code) is only known once the async
+            # queue clears - see OnBuyClient.check_queue(). This column is NOT
+            # NULL, so new rows get a placeholder; a separate backfill script
+            # (like fetch_listing_ids.py already does for Listing ID) would be
+            # needed to write real OPC values without this pipeline clobbering
+            # them back to "PENDING" on the next run.
+            "OPC": "PENDING",
+        }
+        listing_id = str(row.get("Listing ID") or "").strip()
+        if listing_id:
+            supabase_row["Listing ID"] = listing_id
+        if sync_status:
+            supabase_row["Sync Status"] = sync_status
+        if onbuy_product_created:
+            supabase_row["OnBuy Product Created"] = onbuy_product_created
+        if onbuy_listing_active:
+            supabase_row["OnBuy Listing Active"] = onbuy_listing_active
+        if onbuy_product_id:
+            supabase_row["OnBuy Product ID"] = onbuy_product_id
+        if last_onbuy_sync:
+            supabase_row["Last OnBuy Sync"] = last_onbuy_sync
+
+        supabase_rows.append(supabase_row)
+
+    supabase_ok = supabase_db.upsert_products(supabase_rows)
 
     # ================= GENERATE XML (kept as fallback) =================
     root = ET.Element("products")
@@ -569,6 +663,7 @@ def main():
     logger.info("OnBuy API pushed: %d, failed: %d", onbuy_pushed, onbuy_failed)
     logger.info("Feed products: %d, skipped: %d", feed_count, skipped_feed)
     logger.info("Feed URL: %s", feed_url or "(not uploaded - see SUPABASE_URL/SUPABASE_SERVICE_KEY)")
+    logger.info("Supabase database export: %s (%d rows)", "OK" if supabase_ok else "skipped/failed", len(supabase_rows))
 
     if fetch_failures >= FETCH_FAILURE_ALERT_THRESHOLD or onbuy_failed > 0:
         notify.send_alert_email(
