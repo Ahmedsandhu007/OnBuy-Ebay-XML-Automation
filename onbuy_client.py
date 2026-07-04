@@ -178,7 +178,12 @@ class OnBuyClient:
         response itself, surfaces the actual validation/processing error.
         """
         def _do_check():
-            resp = requests.get(f"{BASE_URL}/queues/{queue_id}", headers=self._headers(), timeout=30)
+            resp = requests.get(
+                f"{BASE_URL}/queues/{queue_id}",
+                headers=self._headers(),
+                params={"site_id": self.site_id},
+                timeout=30,
+            )
             logger.info("OnBuy check_queue(%s) raw response [%s]: %s", queue_id, resp.status_code, resp.text[:3000])
             raise_for_status(resp, what=f"onbuy check_queue({queue_id})")
             return resp.json()
