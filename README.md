@@ -36,6 +36,7 @@ Settings -> Secrets and variables -> Actions -> **Variables** tab (not secret, j
 | `ONBUY_USE_SANDBOX` | `true`/`false` - routes OnBuy API calls to the sandbox credentials instead of production. Defaults to off. |
 | `ONBUY_API_TEST_SKUS` | Comma-separated SKU allowlist while testing the API push against production |
 | `SUPABASE_FEED_BUCKET` | Defaults to `onbuy-feeds` if unset |
+| `ONBUY_MAX_PUSHES_PER_RUN` | Defaults to `200` - safety cap under OnBuy's confirmed 240/hour limit, see "Scaling" below |
 | `EBAY_DAILY_CALL_BUDGET` | Defaults to `4000` - see "Scaling" below |
 | `RUNS_PER_DAY` | Defaults to `8` - must match the cron schedule below |
 | `MAX_PRODUCTS_PER_RUN` | Optional hard override for the batch size instead of the budget-derived one |
@@ -119,7 +120,15 @@ a full refresh cycle over M rows takes ~X day(s)`. To go faster, either
 increase `EBAY_DAILY_CALL_BUDGET` (if your eBay Developer Portal tier allows
 more than the ~4,000/day default assumed here) or increase `RUNS_PER_DAY`
 and update the cron schedule in `run.yml` to match. OnBuy's own limits
-(confirmed from your account: 4,800 PUT/day, 4,800 POST/day) have much more
-headroom than eBay's at this scale, since most runs are cheap PUT-only price/
-stock refreshes - eBay is the real bottleneck for how large this catalog can
-grow.
+(confirmed from your account: 4,800 PUT/day, 4,800 POST/day, **240/hour for
+both**) have much more daily headroom than eBay's at this scale, but the
+hourly cap matters once a single run can process hundreds of rows -
+`ONBUY_MAX_PUSHES_PER_RUN` (default 200) caps OnBuy pushes per run so one
+large run can't burst through the hourly limit on its own; rows beyond that
+cap still get their Sheet/Supabase update, just not pushed to OnBuy until
+their next turn. eBay is the real bottleneck for how large this catalog can
+grow overall.
+
+Google Sheets writes are batched into a single API call per run (not one per
+row), regardless of batch size, so growing the batch size doesn't risk
+Google's own rate limits either.
