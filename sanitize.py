@@ -29,6 +29,11 @@ _NOISE_PATTERNS = [
     r"ebay\.(co\.uk|com)\S*",
     r"paypal\.\S*",
     r"https?://\S+",  # any bare URL left after tag-stripping is an external link
+    # Leftover template title from this seller's bulk-listing tool - appears
+    # verbatim at the start of many otherwise-unrelated listings' descriptions
+    # (confirmed 2026-07-04: same fixed phrase prefixed onto ~9 different,
+    # correctly-distinct product descriptions).
+    r"3D\s*Optical\s*Illusion\s*Endless\s*Abyss\s*Floor\s*Mat\s*",
 ]
 # A single (?i) at the start applies to every alternative - Python 3.11+
 # rejects a repeated inline flag inside each alternative of a joined pattern.
