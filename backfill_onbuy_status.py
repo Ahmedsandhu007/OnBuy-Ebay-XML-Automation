@@ -87,6 +87,12 @@ print(f"Found {len(found)} of {len(pending)} pending SKU(s) in the queue history
 
 sheet_updates = []
 supabase_rows = []
+# Postgres validates NOT NULL columns on the candidate row before it even
+# checks ON CONFLICT, so upserting a bare {"SKU", "Sync Status", ...} dict
+# fails outright if that column set omits any NOT NULL column (Title, etc.) -
+# same issue generate_xml.py hit and fixed the same way. Fetch the full
+# existing row and update just the tracking columns on top of it instead.
+existing_rows = supabase_db.fetch_full_rows(list(found.keys()))
 
 for sku, entry in found.items():
     row_index = pending[sku]
@@ -110,7 +116,15 @@ for sku, entry in found.items():
     if "OnBuy Listing Active" in col_map:
         sheet_updates.append({"range": f"{col_letter(col_map['OnBuy Listing Active'])}{row_index}", "values": [[listing_active]]})
 
-    supabase_row = {"SKU": sku, "Sync Status": sync_status, "OnBuy Listing Active": listing_active}
+    existing = existing_rows.get(sku)
+    if existing is None:
+        print(f"{sku}: no existing Supabase row yet - skipping Supabase update "
+              f"(the next generate_xml.py run will create it with full data)")
+        continue
+
+    supabase_row = dict(existing)
+    supabase_row["Sync Status"] = sync_status
+    supabase_row["OnBuy Listing Active"] = listing_active
     if opc:
         supabase_row["OPC"] = opc
     supabase_rows.append(supabase_row)

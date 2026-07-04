@@ -533,11 +533,11 @@ def main():
     onbuy_updated = 0
     onbuy_failed = 0
     onbuy_pushes_this_run = 0
-    supabase_rows = []  # core fields, uniform keys, every processed row
-    supabase_tracking_rows = []  # OnBuy-provided fields, uniform keys, only rows pushed this run -
-    # kept separate from supabase_rows because PostgREST's bulk upsert requires every
-    # object in one call to have the exact same keys, and most rows don't get an OnBuy
-    # push attempt each run (see the "All object keys must match" fix below).
+    supabase_rows = []  # one upsert for the whole run - every row must have
+    # identical keys (PostgREST's bulk-upsert requirement) AND every NOT NULL
+    # column must be present (Postgres validates that on the candidate insert
+    # row before it even checks ON CONFLICT, so a partial-column "tracking
+    # only" upsert can never work here - see fetch_existing_fields()).
     highlight_requests = []
     all_sheet_updates = []  # accumulated across every row, written in ONE batch_update
     # after the loop instead of one call per row - a run can now process
@@ -546,13 +546,14 @@ def main():
     # weren't a concern back when this was capped at a hardcoded 12/run.
     num_cols = len(headers)
 
-    # Pre-fetch existing OPCs for this run's batch so the core Supabase row
-    # (below) can preserve a real OPC already recorded by
-    # backfill_onbuy_status.py, instead of stomping it back to "PENDING"
-    # every single regular sync run.
+    # Pre-fetch OPC + OnBuy-tracking fields already on record for this run's
+    # batch, so the single Supabase upsert (below) can carry forward real
+    # values instead of blanking them out for rows not pushed to OnBuy this
+    # run - see fetch_existing_fields() for why this has to be a single
+    # always-full-row upsert rather than a separate partial-column one.
     skus_in_batch = [str(row.get("SKU") or "").strip() for _, row in sorted_data[:MAX_PRODUCTS_PER_RUN]]
     skus_in_batch = [s for s in skus_in_batch if s]
-    existing_opcs = supabase_db.fetch_existing_opcs(skus_in_batch)
+    existing_fields = supabase_db.fetch_existing_fields(skus_in_batch)
 
     for idx, row in sorted_data[:MAX_PRODUCTS_PER_RUN]:
         i = idx + 2
@@ -735,13 +736,11 @@ def main():
         time.sleep(0.2)  # light pacing on eBay fetches; OnBuy pushes are paced separately below
 
         # ================= SUPABASE EXPORT ROW (upserted once after the loop) =================
-        # Core fields only - every row in this list must have the exact same
-        # keys (PostgREST's bulk upsert requirement), so OnBuy-provided
-        # tracking fields are NOT included here even as None/blank; they'd be
-        # uniform within this list but would still overwrite an existing
-        # Sync Status/OnBuy Listing Active/etc. with blank for the ~148 rows
-        # not pushed to OnBuy this run. Those go in supabase_tracking_rows
-        # instead, upserted separately, only for rows actually pushed.
+        # Every row - including OnBuy-tracking fields - goes in this one list,
+        # and every row must have identical keys AND real values for every NOT
+        # NULL column (see fetch_existing_fields() for why a separate
+        # partial-column upsert doesn't work here).
+        existing = existing_fields.get(sku, {})
         supabase_row = {
             "SKU": sku,
             "Title": title or str(row.get("Title") or ""),
@@ -770,23 +769,19 @@ def main():
             # NULL, so a genuinely new row needs a placeholder - but reuse the
             # real value from Supabase if backfill_onbuy_status.py already
             # found one, instead of stomping it back to "PENDING" every run.
-            "OPC": existing_opcs.get(sku) or "PENDING",
+            "OPC": existing.get("OPC") or "PENDING",
+            # OnBuy-tracking fields: use this run's fresh value if a push was
+            # attempted, otherwise carry forward whatever was already there
+            # (never blank it out) - see fetch_existing_fields() for why
+            # these have to live on the same row as the fields above rather
+            # than a separate partial-column upsert.
+            "Sync Status": sync_status or existing.get("Sync Status") or "",
+            "OnBuy Product Created": onbuy_product_created or existing.get("OnBuy Product Created") or "",
+            "OnBuy Listing Active": onbuy_listing_active or existing.get("OnBuy Listing Active") or "",
+            "OnBuy Product ID": onbuy_product_id or existing.get("OnBuy Product ID") or "",
+            "Last OnBuy Sync": last_onbuy_sync or existing.get("Last OnBuy Sync") or "",
         }
         supabase_rows.append(supabase_row)
-
-        # Separate, smaller batch: only rows with an OnBuy push attempt this
-        # run, with uniform keys within this list (always all 5 fields, using
-        # "" for onbuy_product_id on the "updated" path where there's no
-        # queue_id, so every entry here has the same keys too).
-        if sync_status:
-            supabase_tracking_rows.append({
-                "SKU": sku,
-                "Sync Status": sync_status,
-                "OnBuy Product Created": onbuy_product_created or "",
-                "OnBuy Listing Active": onbuy_listing_active or "",
-                "OnBuy Product ID": onbuy_product_id or "",
-                "Last OnBuy Sync": last_onbuy_sync or "",
-            })
 
     # ================= APPLY ALL SHEET VALUE UPDATES (one call for the whole run) =================
     if all_sheet_updates:
@@ -815,28 +810,8 @@ def main():
             # transient blip is unlikely to lose everything.
             logger.error("Sheet batch update failed after retries - this run's Sheet changes may not be saved: %s", exc)
 
-    supabase_rows = dedupe_rows_by_sku(supabase_rows, "Supabase core export")
-    supabase_tracking_rows = dedupe_rows_by_sku(supabase_tracking_rows, "Supabase OnBuy-tracking export")
-
+    supabase_rows = dedupe_rows_by_sku(supabase_rows, "Supabase export")
     supabase_ok = supabase_db.upsert_products(supabase_rows)
-    if not supabase_tracking_rows:
-        supabase_tracking_ok = True
-    elif supabase_ok:
-        supabase_tracking_ok = supabase_db.upsert_products(supabase_tracking_rows)
-    else:
-        # A tracking-only row (SKU + a handful of OnBuy fields) relies on a
-        # full row for that SKU already existing so the upsert's ON CONFLICT
-        # branch UPDATEs it. Normally the core upsert just above guarantees
-        # that within this same run - but if it failed, sending the
-        # tracking-only rows anyway would try to INSERT bare rows missing
-        # required fields like Title, violating the table's NOT NULL
-        # constraints (as happened when a duplicate-SKU core failure cascaded
-        # into a Supabase 23502 error on the tracking batch).
-        supabase_tracking_ok = False
-        logger.warning(
-            "Supabase OnBuy-tracking export: skipped because the core export failed this run "
-            "(would risk inserting incomplete rows for any brand-new SKU)"
-        )
 
     if highlight_requests:
         try:
@@ -900,11 +875,6 @@ def main():
     logger.info("Feed products: %d, skipped: %d", feed_count, skipped_feed)
     logger.info("Feed URL: %s", feed_url or "(not uploaded - see SUPABASE_URL/SUPABASE_SERVICE_KEY)")
     logger.info("Supabase database export: %s (%d rows)", "OK" if supabase_ok else "skipped/failed", len(supabase_rows))
-    if supabase_tracking_rows:
-        logger.info(
-            "Supabase OnBuy-tracking export: %s (%d rows)",
-            "OK" if supabase_tracking_ok else "skipped/failed", len(supabase_tracking_rows),
-        )
 
     if fetch_failures >= FETCH_FAILURE_ALERT_THRESHOLD or onbuy_failed > 0:
         notify.send_alert_email(
