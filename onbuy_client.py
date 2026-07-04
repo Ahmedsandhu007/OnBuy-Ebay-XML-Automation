@@ -170,6 +170,21 @@ class OnBuyClient:
 
         return with_retry(_do_list, what="onbuy list_listings", max_attempts=3)
 
+    def check_queue(self, queue_id):
+        """GET /v2/queues/{queue_id} - per OnBuy support (2026-07-02): a
+        queue_id from POST /v2/products only means "accepted for async
+        processing," not "created." This checks whether that submission has
+        succeeded, is still pending, or failed - and, unlike the create
+        response itself, surfaces the actual validation/processing error.
+        """
+        def _do_check():
+            resp = requests.get(f"{BASE_URL}/queues/{queue_id}", headers=self._headers(), timeout=30)
+            logger.info("OnBuy check_queue(%s) raw response [%s]: %s", queue_id, resp.status_code, resp.text[:3000])
+            raise_for_status(resp, what=f"onbuy check_queue({queue_id})")
+            return resp.json()
+
+        return with_retry(_do_check, what=f"onbuy check_queue({queue_id})", max_attempts=3)
+
     def sync_product(self, **kwargs):
         """Update price/stock for an existing SKU; if OnBuy reports the SKU
         doesn't exist ("SKU does not exist", returned as HTTP 200 with the
