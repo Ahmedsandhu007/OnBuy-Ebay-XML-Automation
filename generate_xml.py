@@ -80,6 +80,15 @@ PRICE_CHECK_MEDIUM_MAX_PCT = 70
 ONBUY_API_PUSH_ENABLED = os.getenv("ONBUY_API_PUSH_ENABLED", "false").strip().lower() == "true"
 ONBUY_API_TEST_SKUS = {s.strip() for s in os.getenv("ONBUY_API_TEST_SKUS", "").split(",") if s.strip()}
 
+# Confirmed from the real account's API usage page: OnBuy allows 240 PUT and
+# 240 POST calls per hour. The eBay-derived batch size above can now be much
+# larger than 12 (up to hundreds of rows/run), which didn't exist as a risk
+# when this was hardcoded at 12 - cap OnBuy pushes per run well under the
+# hourly limit so one large run can't burn through it on its own. Rows beyond
+# this cap still get their Sheet/Supabase update this run; they just wait
+# for their next turn to reach OnBuy.
+ONBUY_MAX_PUSHES_PER_RUN = int(os.getenv("ONBUY_MAX_PUSHES_PER_RUN") or "200")
+
 # How many eBay fetch failures (after retries) in one run before we email an alert.
 FETCH_FAILURE_ALERT_THRESHOLD = 3
 
@@ -501,8 +510,14 @@ def main():
     onbuy_created = 0
     onbuy_updated = 0
     onbuy_failed = 0
+    onbuy_pushes_this_run = 0
     supabase_rows = []
     highlight_requests = []
+    all_sheet_updates = []  # accumulated across every row, written in ONE batch_update
+    # after the loop instead of one call per row - a run can now process
+    # hundreds of rows (see dynamic batch sizing above), and one Sheets API
+    # write call per row at that scale risks Google's own rate limits, which
+    # weren't a concern back when this was capped at a hardcoded 12/run.
     num_cols = len(headers)
 
     for idx, row in sorted_data[:MAX_PRODUCTS_PER_RUN]:
@@ -513,7 +528,7 @@ def main():
             continue
 
         try:
-            _, ebay_data = get_ebay_data(url, token)
+            available, ebay_data = get_ebay_data(url, token)
         except (TransientError, PermanentError) as exc:
             fetch_failures += 1
             run_had_errors = True
@@ -522,6 +537,25 @@ def main():
 
         stock = ebay_data["stock"]
         cost_price = ebay_data["price"]
+
+        # When eBay reports the item unavailable (removed/no price/out of
+        # stock), ebay_data's descriptive fields are all blank - previously
+        # those blanks got written straight over the Sheet's existing good
+        # data, making the row look emptied out. Only stock/price/status
+        # should reflect "unavailable"; title/description/images/brand keep
+        # whatever was already there.
+        if available:
+            title = ebay_data["title"]
+            description = ebay_data["description"]
+            brand = ebay_data["brand"]
+            main_image = ebay_data["main_image"]
+            additional_images = ebay_data["additional_images"]
+        else:
+            title = str(row.get("Title") or "")
+            description = str(row.get("Description") or "")
+            brand = str(row.get("Brand") or "")
+            main_image = str(row.get("Image URL") or "")
+            additional_images = [img.strip() for img in str(row.get("Additional Images") or "").split(",") if img.strip()]
 
         # ================= SKU (must be entered manually - OnBuy requires unique
         # SKUs, and two different sourcing links can share the same barcode/item
@@ -539,7 +573,7 @@ def main():
             category = current_category
             category_needs_write = False
         else:
-            category = map_onbuy_category(ebay_data["title"], current_category, ebay_data["description"])
+            category = map_onbuy_category(title, current_category, description)
             category_needs_write = category != current_category
         category_id = category_id_by_path.get(category.strip().lower())
 
@@ -570,7 +604,7 @@ def main():
             else:
                 price_check_flag = "High"
 
-        additional_images_str = ",".join(ebay_data["additional_images"])
+        additional_images_str = ",".join(additional_images)
         now_str = datetime.now(PK_TZ).strftime("%Y-%m-%d %H:%M:%S")
         is_active = stock > 0
 
@@ -585,19 +619,20 @@ def main():
         onbuy_product_id = None
         last_onbuy_sync = None
 
-        if sku and onbuy_ready and should_push_to_onbuy(sku):
+        if sku and onbuy_ready and should_push_to_onbuy(sku) and onbuy_pushes_this_run < ONBUY_MAX_PUSHES_PER_RUN:
+            onbuy_pushes_this_run += 1
             try:
                 action, result = onbuy.sync_product(
                     sku=sku,
                     ean=ean,
-                    title=ebay_data["title"] or str(row.get("Title") or ""),
-                    description=ebay_data["description"],
-                    brand=ebay_data["brand"],
+                    title=title or str(row.get("Title") or ""),
+                    description=description,
+                    brand=brand,
                     category_id=category_id,
                     price=selling_price,
                     stock=stock,
-                    main_image=ebay_data["main_image"],
-                    additional_images=ebay_data["additional_images"],
+                    main_image=main_image,
+                    additional_images=additional_images,
                 )
                 logger.info("OnBuy %s: %s", action, sku)
                 last_onbuy_sync = now_str
@@ -621,58 +656,56 @@ def main():
                 run_had_errors = True
                 sync_status = "Failed"
                 logger.error("OnBuy push failed for SKU %s: %s", sku, exc)
+            # Confirmed from the account's own API usage page: 240 PUT/POST per
+            # hour. Paired with ONBUY_MAX_PUSHES_PER_RUN above, this keeps a
+            # single large run from bursting through the hourly limit on its own.
+            time.sleep(0.5)
 
-        updates = [
+        row_updates = [
             {"range": f"{col_letter(col_map['Cost Price (£)'])}{i}", "values": [[cost_price]]},
             {"range": f"{col_letter(col_map['Stock'])}{i}", "values": [[stock]]},
             {"range": f"{col_letter(col_map['Selling Price (£)'])}{i}", "values": [[selling_price]]},
             {"range": f"{col_letter(col_map['Status'])}{i}", "values": [["ACTIVE" if is_active else "INACTIVE"]]},
-            {"range": f"{col_letter(col_map['Description'])}{i}", "values": [[ebay_data["description"]]]},
-            {"range": f"{col_letter(col_map['Image URL'])}{i}", "values": [[ebay_data["main_image"]]]},
+            {"range": f"{col_letter(col_map['Description'])}{i}", "values": [[description]]},
+            {"range": f"{col_letter(col_map['Image URL'])}{i}", "values": [[main_image]]},
             {"range": f"{col_letter(col_map['Additional Images'])}{i}", "values": [[additional_images_str]]},
-            {"range": f"{col_letter(col_map['Brand'])}{i}", "values": [[ebay_data["brand"]]]},
-            {"range": f"{col_letter(col_map['Title'])}{i}", "values": [[ebay_data["title"]]]},
+            {"range": f"{col_letter(col_map['Brand'])}{i}", "values": [[brand]]},
+            {"range": f"{col_letter(col_map['Title'])}{i}", "values": [[title]]},
             {"range": f"{col_letter(col_map['Last Updated'])}{i}", "values": [[now_str]]},
             {"range": f"{col_letter(col_map['Last Checked Time'])}{i}", "values": [[now_str]]},
         ]
         if category_needs_write:
-            updates.append({"range": f"{col_letter(col_map['Category'])}{i}", "values": [[category]]})
+            row_updates.append({"range": f"{col_letter(col_map['Category'])}{i}", "values": [[category]]})
         if "Price Check Flag" in col_map:
-            updates.append({"range": f"{col_letter(col_map['Price Check Flag'])}{i}", "values": [[price_check_flag]]})
+            row_updates.append({"range": f"{col_letter(col_map['Price Check Flag'])}{i}", "values": [[price_check_flag]]})
         if "EAN" in col_map:
-            updates.append({"range": f"{col_letter(col_map['EAN'])}{i}", "values": [[ean]]})
+            row_updates.append({"range": f"{col_letter(col_map['EAN'])}{i}", "values": [[ean]]})
         # OnBuy-provided tracking fields, written to the Sheet only if those
         # columns exist there and only when a push actually happened this run
         # - otherwise leaving them out preserves whatever was already there.
         if sync_status and "Sync Status" in col_map:
-            updates.append({"range": f"{col_letter(col_map['Sync Status'])}{i}", "values": [[sync_status]]})
+            row_updates.append({"range": f"{col_letter(col_map['Sync Status'])}{i}", "values": [[sync_status]]})
         if onbuy_product_created and "OnBuy Product Created" in col_map:
-            updates.append({"range": f"{col_letter(col_map['OnBuy Product Created'])}{i}", "values": [[onbuy_product_created]]})
+            row_updates.append({"range": f"{col_letter(col_map['OnBuy Product Created'])}{i}", "values": [[onbuy_product_created]]})
         if onbuy_listing_active and "OnBuy Listing Active" in col_map:
-            updates.append({"range": f"{col_letter(col_map['OnBuy Listing Active'])}{i}", "values": [[onbuy_listing_active]]})
+            row_updates.append({"range": f"{col_letter(col_map['OnBuy Listing Active'])}{i}", "values": [[onbuy_listing_active]]})
         if onbuy_product_id and "OnBuy Product ID" in col_map:
-            updates.append({"range": f"{col_letter(col_map['OnBuy Product ID'])}{i}", "values": [[onbuy_product_id]]})
+            row_updates.append({"range": f"{col_letter(col_map['OnBuy Product ID'])}{i}", "values": [[onbuy_product_id]]})
         if last_onbuy_sync and "Last OnBuy Sync" in col_map:
-            updates.append({"range": f"{col_letter(col_map['Last OnBuy Sync'])}{i}", "values": [[last_onbuy_sync]]})
+            row_updates.append({"range": f"{col_letter(col_map['Last OnBuy Sync'])}{i}", "values": [[last_onbuy_sync]]})
 
-        try:
-            with_retry(sheet.batch_update, updates, what=f"sheet update row {i}", max_attempts=3)
-        except Exception as exc:
-            run_had_errors = True
-            logger.error("Row %d: sheet update failed after retries, skipping - %s", i, exc)
-            continue
-
+        all_sheet_updates.extend(row_updates)
         updated_count += 1
-        logger.info("Updated row %d", i)
+        logger.info("Processed row %d", i)
         highlight_requests.append(row_highlight_request(sheet.id, i, num_cols, is_active))
-        time.sleep(0.5)  # keep the Sheets API write rate gentle, as the original pipeline did
+        time.sleep(0.2)  # light pacing on eBay fetches; OnBuy pushes are paced separately below
 
         # ================= SUPABASE EXPORT ROW (upserted once after the loop) =================
         supabase_row = {
             "SKU": sku,
-            "Title": ebay_data["title"] or str(row.get("Title") or ""),
-            "Description": ebay_data["description"],
-            "Brand": ebay_data["brand"],
+            "Title": title or str(row.get("Title") or ""),
+            "Description": description,
+            "Brand": brand,
             "Category": category,
             "Category ID": str(category_id) if category_id is not None else None,
             "Supplier URL": url,
@@ -685,7 +718,7 @@ def main():
             "Selling Price (£)": selling_price,
             "Status": "ACTIVE" if stock > 0 else "INACTIVE",
             "Last Updated": datetime.now(PK_TZ).isoformat(),
-            "Image URL": ebay_data["main_image"],
+            "Image URL": main_image,
             "Additional Images": additional_images_str,
             "Condition": ebay_data.get("condition") or "New",
             "Last Checked Time": datetime.now(PK_TZ).isoformat(),
@@ -713,6 +746,20 @@ def main():
             supabase_row["Last OnBuy Sync"] = last_onbuy_sync
 
         supabase_rows.append(supabase_row)
+
+    # ================= APPLY ALL SHEET VALUE UPDATES (one call for the whole run) =================
+    if all_sheet_updates:
+        try:
+            with_retry(sheet.batch_update, all_sheet_updates, what="sheet batch update", max_attempts=3)
+        except Exception as exc:
+            run_had_errors = True
+            # This is an all-or-nothing commit for the whole run's Sheet writes -
+            # a real trade-off against doing one API call per row (which risked
+            # Google's own rate limits once batch sizes grew past a hardcoded
+            # 12/run). OnBuy/Supabase may already reflect this run's changes
+            # even if this call fails - retried 3x before giving up, so a
+            # transient blip is unlikely to lose everything.
+            logger.error("Sheet batch update failed after retries - this run's Sheet changes may not be saved: %s", exc)
 
     supabase_ok = supabase_db.upsert_products(supabase_rows)
 
