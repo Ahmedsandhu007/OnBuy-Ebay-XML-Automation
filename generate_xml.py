@@ -511,7 +511,11 @@ def main():
     onbuy_updated = 0
     onbuy_failed = 0
     onbuy_pushes_this_run = 0
-    supabase_rows = []
+    supabase_rows = []  # core fields, uniform keys, every processed row
+    supabase_tracking_rows = []  # OnBuy-provided fields, uniform keys, only rows pushed this run -
+    # kept separate from supabase_rows because PostgREST's bulk upsert requires every
+    # object in one call to have the exact same keys, and most rows don't get an OnBuy
+    # push attempt each run (see the "All object keys must match" fix below).
     highlight_requests = []
     all_sheet_updates = []  # accumulated across every row, written in ONE batch_update
     # after the loop instead of one call per row - a run can now process
@@ -519,6 +523,14 @@ def main():
     # write call per row at that scale risks Google's own rate limits, which
     # weren't a concern back when this was capped at a hardcoded 12/run.
     num_cols = len(headers)
+
+    # Pre-fetch existing OPCs for this run's batch so the core Supabase row
+    # (below) can preserve a real OPC already recorded by
+    # backfill_onbuy_status.py, instead of stomping it back to "PENDING"
+    # every single regular sync run.
+    skus_in_batch = [str(row.get("SKU") or "").strip() for _, row in sorted_data[:MAX_PRODUCTS_PER_RUN]]
+    skus_in_batch = [s for s in skus_in_batch if s]
+    existing_opcs = supabase_db.fetch_existing_opcs(skus_in_batch)
 
     for idx, row in sorted_data[:MAX_PRODUCTS_PER_RUN]:
         i = idx + 2
@@ -701,6 +713,13 @@ def main():
         time.sleep(0.2)  # light pacing on eBay fetches; OnBuy pushes are paced separately below
 
         # ================= SUPABASE EXPORT ROW (upserted once after the loop) =================
+        # Core fields only - every row in this list must have the exact same
+        # keys (PostgREST's bulk upsert requirement), so OnBuy-provided
+        # tracking fields are NOT included here even as None/blank; they'd be
+        # uniform within this list but would still overwrite an existing
+        # Sync Status/OnBuy Listing Active/etc. with blank for the ~148 rows
+        # not pushed to OnBuy this run. Those go in supabase_tracking_rows
+        # instead, upserted separately, only for rows actually pushed.
         supabase_row = {
             "SKU": sku,
             "Title": title or str(row.get("Title") or ""),
@@ -723,34 +742,47 @@ def main():
             "Condition": ebay_data.get("condition") or "New",
             "Last Checked Time": datetime.now(PK_TZ).isoformat(),
             "EAN": ean,
+            "Listing ID": str(row.get("Listing ID") or "").strip() or None,
             # OPC (OnBuy's permanent product code) is only known once the async
             # queue clears - see OnBuyClient.check_queue(). This column is NOT
-            # NULL, so new rows get a placeholder; a separate backfill script
-            # (like fetch_listing_ids.py already does for Listing ID) would be
-            # needed to write real OPC values without this pipeline clobbering
-            # them back to "PENDING" on the next run.
-            "OPC": "PENDING",
+            # NULL, so a genuinely new row needs a placeholder - but reuse the
+            # real value from Supabase if backfill_onbuy_status.py already
+            # found one, instead of stomping it back to "PENDING" every run.
+            "OPC": existing_opcs.get(sku) or "PENDING",
         }
-        listing_id = str(row.get("Listing ID") or "").strip()
-        if listing_id:
-            supabase_row["Listing ID"] = listing_id
-        if sync_status:
-            supabase_row["Sync Status"] = sync_status
-        if onbuy_product_created:
-            supabase_row["OnBuy Product Created"] = onbuy_product_created
-        if onbuy_listing_active:
-            supabase_row["OnBuy Listing Active"] = onbuy_listing_active
-        if onbuy_product_id:
-            supabase_row["OnBuy Product ID"] = onbuy_product_id
-        if last_onbuy_sync:
-            supabase_row["Last OnBuy Sync"] = last_onbuy_sync
-
         supabase_rows.append(supabase_row)
+
+        # Separate, smaller batch: only rows with an OnBuy push attempt this
+        # run, with uniform keys within this list (always all 5 fields, using
+        # "" for onbuy_product_id on the "updated" path where there's no
+        # queue_id, so every entry here has the same keys too).
+        if sync_status:
+            supabase_tracking_rows.append({
+                "SKU": sku,
+                "Sync Status": sync_status,
+                "OnBuy Product Created": onbuy_product_created or "",
+                "OnBuy Listing Active": onbuy_listing_active or "",
+                "OnBuy Product ID": onbuy_product_id or "",
+                "Last OnBuy Sync": last_onbuy_sync or "",
+            })
 
     # ================= APPLY ALL SHEET VALUE UPDATES (one call for the whole run) =================
     if all_sheet_updates:
+        # gspread's batch_update() mutates each dict's "range" in place
+        # (unconditionally re-qualifying it with the sheet name, even if
+        # already qualified - confirmed from its source). Passing the same
+        # list to a retried call would double-qualify the range on the 2nd
+        # attempt ('Sheet1'!'Sheet1'!I35), which is invalid and fails outright.
+        # Keep the original (range, values) pairs immutable and rebuild fresh
+        # dicts on every attempt so a retry never sees an already-mutated one.
+        original_pairs = [(u["range"], u["values"]) for u in all_sheet_updates]
+
+        def _do_sheet_update():
+            fresh_updates = [{"range": r, "values": v} for r, v in original_pairs]
+            return sheet.batch_update(fresh_updates)
+
         try:
-            with_retry(sheet.batch_update, all_sheet_updates, what="sheet batch update", max_attempts=3)
+            with_retry(_do_sheet_update, what="sheet batch update", max_attempts=3)
         except Exception as exc:
             run_had_errors = True
             # This is an all-or-nothing commit for the whole run's Sheet writes -
@@ -762,6 +794,7 @@ def main():
             logger.error("Sheet batch update failed after retries - this run's Sheet changes may not be saved: %s", exc)
 
     supabase_ok = supabase_db.upsert_products(supabase_rows)
+    supabase_tracking_ok = supabase_db.upsert_products(supabase_tracking_rows)
 
     if highlight_requests:
         try:
@@ -825,6 +858,11 @@ def main():
     logger.info("Feed products: %d, skipped: %d", feed_count, skipped_feed)
     logger.info("Feed URL: %s", feed_url or "(not uploaded - see SUPABASE_URL/SUPABASE_SERVICE_KEY)")
     logger.info("Supabase database export: %s (%d rows)", "OK" if supabase_ok else "skipped/failed", len(supabase_rows))
+    if supabase_tracking_rows:
+        logger.info(
+            "Supabase OnBuy-tracking export: %s (%d rows)",
+            "OK" if supabase_tracking_ok else "skipped/failed", len(supabase_tracking_rows),
+        )
 
     if fetch_failures >= FETCH_FAILURE_ALERT_THRESHOLD or onbuy_failed > 0:
         notify.send_alert_email(

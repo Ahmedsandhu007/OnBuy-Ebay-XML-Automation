@@ -54,3 +54,40 @@ def upsert_products(rows):
 
     logger.info("Supabase database export: upserted %d row(s)", len(rows))
     return True
+
+
+def fetch_existing_opcs(skus):
+    """Returns {sku: opc} for whichever of these SKUs already have a Supabase
+    row. Used so the regular sync run can avoid clobbering a real OPC (set by
+    backfill_onbuy_status.py once OnBuy's approval queue clears) back to the
+    "PENDING" placeholder every time it runs. Never raises - returns {} on
+    any failure, which just means every row falls back to "PENDING" for OPC
+    this run (safe, if not perfectly up to date).
+    """
+    if not skus:
+        return {}
+
+    supabase_url = os.getenv("SUPABASE_URL")
+    service_key = os.getenv("SUPABASE_SERVICE_KEY")
+    if not supabase_url or not service_key:
+        return {}
+
+    endpoint = f"{supabase_url.rstrip('/')}/rest/v1/{TABLE_NAME}"
+    headers = {"apikey": service_key, "Authorization": f"Bearer {service_key}"}
+    params = {"select": "SKU,OPC", "SKU": f"in.({','.join(skus)})"}
+
+    try:
+        resp = requests.get(endpoint, headers=headers, params=params, timeout=30)
+    except requests.exceptions.RequestException as exc:
+        logger.error("Fetching existing OPCs failed: %s", exc)
+        return {}
+
+    if resp.status_code != 200:
+        logger.error("Fetching existing OPCs failed (%s): %s", resp.status_code, resp.text[:300])
+        return {}
+
+    try:
+        return {row["SKU"]: row.get("OPC") for row in resp.json()}
+    except (ValueError, KeyError, TypeError) as exc:
+        logger.error("Fetching existing OPCs: unexpected response shape: %s", exc)
+        return {}
