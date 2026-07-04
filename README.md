@@ -74,7 +74,11 @@ the sandbox and never touch the live account.
 
 Add a row with the `Supplier URL` (an eBay item link) **and a unique SKU**
 filled in - both are required; OnBuy rejects duplicate SKUs, so this isn't
-auto-generated. Everything else fills in on the next run:
+auto-generated. If two rows ever end up with the same SKU by mistake (e.g. a
+copy-pasted row), the database export drops the older duplicate and logs a
+warning naming the SKU to fix - it won't silently corrupt the run, but the
+Sheet still needs a human to correct the duplicate. Everything else fills in
+on the next run:
 
 - **Category**: auto-matched against `onbuy_categories_only.csv` using the
   fetched title/description.

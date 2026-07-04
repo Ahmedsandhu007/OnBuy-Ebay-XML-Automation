@@ -119,6 +119,28 @@ def parse_time(value):
         return datetime(2000, 1, 1)
 
 
+def dedupe_rows_by_sku(rows, what):
+    """Postgres/PostgREST rejects a whole bulk upsert if two rows in the same
+    call share the same SKU (the conflict target) - "ON CONFLICT DO UPDATE
+    command cannot affect row a second time". That only happens from a real
+    duplicate SKU somewhere in the Sheet (e.g. a copy-pasted row, or the same
+    value with stray whitespace), so keep the last occurrence and log which
+    SKU(s) need fixing in the Sheet, rather than losing the whole batch."""
+    deduped = {}
+    duplicates = set()
+    for row in rows:
+        sku = row.get("SKU")
+        if sku in deduped:
+            duplicates.add(sku)
+        deduped[sku] = row
+    if duplicates:
+        logger.warning(
+            "%s: %d row(s) dropped due to duplicate SKU(s) in the Sheet - please fix these SKUs: %s",
+            what, len(duplicates), ", ".join(sorted(duplicates)),
+        )
+    return list(deduped.values())
+
+
 _RED = {"red": 0.96, "green": 0.8, "blue": 0.8}
 _WHITE = {"red": 1, "green": 1, "blue": 1}
 
@@ -793,8 +815,28 @@ def main():
             # transient blip is unlikely to lose everything.
             logger.error("Sheet batch update failed after retries - this run's Sheet changes may not be saved: %s", exc)
 
+    supabase_rows = dedupe_rows_by_sku(supabase_rows, "Supabase core export")
+    supabase_tracking_rows = dedupe_rows_by_sku(supabase_tracking_rows, "Supabase OnBuy-tracking export")
+
     supabase_ok = supabase_db.upsert_products(supabase_rows)
-    supabase_tracking_ok = supabase_db.upsert_products(supabase_tracking_rows)
+    if not supabase_tracking_rows:
+        supabase_tracking_ok = True
+    elif supabase_ok:
+        supabase_tracking_ok = supabase_db.upsert_products(supabase_tracking_rows)
+    else:
+        # A tracking-only row (SKU + a handful of OnBuy fields) relies on a
+        # full row for that SKU already existing so the upsert's ON CONFLICT
+        # branch UPDATEs it. Normally the core upsert just above guarantees
+        # that within this same run - but if it failed, sending the
+        # tracking-only rows anyway would try to INSERT bare rows missing
+        # required fields like Title, violating the table's NOT NULL
+        # constraints (as happened when a duplicate-SKU core failure cascaded
+        # into a Supabase 23502 error on the tracking batch).
+        supabase_tracking_ok = False
+        logger.warning(
+            "Supabase OnBuy-tracking export: skipped because the core export failed this run "
+            "(would risk inserting incomplete rows for any brand-new SKU)"
+        )
 
     if highlight_requests:
         try:
