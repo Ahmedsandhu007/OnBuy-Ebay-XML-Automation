@@ -1,8 +1,12 @@
 # OnBuy eBay Sync
 
-Pulls live price/stock/description/images from eBay UK, writes them into the
-`OnBuy_Feed_Master` Google Sheet, and syncs to OnBuy - either via the XML feed
-(`feed.xml`) or directly via OnBuy's API (see `ONBUY_API_PUSH_ENABLED` below).
+Employees only need to paste an eBay sourcing link into the `Supplier URL`
+column of the `OnBuy_Feed_Master` Google Sheet - everything else (SKU, title,
+description, images, category, cost, stock) is fetched and filled in
+automatically. Every run also updates price/stock in the Sheet, syncs to
+OnBuy (via `feed.xml` and/or directly via OnBuy's API - see
+`ONBUY_API_PUSH_ENABLED` below), and mirrors the processed data into the
+Supabase `OnBuy_Feed_Master` table.
 
 Runs on a schedule via `.github/workflows/run.yml` (every 3 hours) or manually
 via the "Run workflow" button on GitHub Actions.
@@ -59,3 +63,33 @@ the sandbox before ever touching the live account:
 The three manual test scripts (`test_onbuy_auth.py`, `test_create_product.py`,
 `test_update_listing.py`, triggered from the Actions tab) always run against
 the sandbox and never touch the live account.
+
+## Adding new products
+
+Add a row with just the `Supplier URL` filled in (an eBay item link) - the
+next run fills in everything else:
+
+- **SKU**: a real barcode (EAN/GTIN/UPC/ISBN) if eBay's listing has one,
+  otherwise the eBay item ID. Written back to the Sheet so it's permanent.
+- **Category**: auto-matched against `onbuy_categories_only.csv` using the
+  fetched title/description.
+- Title, Description (sanitized), Brand, Condition, Cost Price, Stock,
+  Selling Price, Image URL, Additional Images - all fetched from eBay.
+
+## Supabase database export
+
+Every processed row is also upserted into the Supabase `OnBuy_Feed_Master`
+table (same secrets as feed hosting above - `SUPABASE_URL` /
+`SUPABASE_SERVICE_KEY`). A few columns in that table don't have an obvious
+1:1 mapping from the Sheet; here's what's actually written and why - flag any
+of these if they don't match what you intended:
+
+| Column | What's written |
+|---|---|
+| `Supplier` | Always `"eBay"` for now - ready for when Amazon is added |
+| `Category ID` | The numeric OnBuy category ID resolved for the matched category |
+| `Profit %` / `Fee %` | The actual `pricing.py` constants used for that row's price |
+| `EAN` | The real extracted barcode when eBay has one - may differ from `SKU` if your SKU convention isn't itself a barcode |
+| `Sync Status` / `OnBuy Product Created` / `OnBuy Listing Active` / `OnBuy Product ID` / `Last OnBuy Sync` | Only written when an OnBuy push was actually attempted that run (`ONBUY_API_PUSH_ENABLED`) - left untouched otherwise, so they don't get blanked out for rows that weren't pushed |
+| `OPC` | Placeholder `"PENDING"` - OnBuy only assigns the real OPC after its async approval queue clears (see `test_check_queue_status.py`), which this pipeline doesn't poll for. A separate backfill script (like `fetch_listing_ids.py` already does for `Listing ID`) would be needed to fill in real values |
+| `Price Check Flag` | Not currently written - no defined logic for this yet |
