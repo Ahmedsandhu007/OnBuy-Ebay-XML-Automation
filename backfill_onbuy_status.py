@@ -107,7 +107,7 @@ for sku, entry in found.items():
         sync_status = f"Failed: {entry.get('error_message', 'unknown error')}"
         listing_active = "FALSE"
 
-    print(f"{sku}: status={status}, opc={opc}")
+    print(f"{sku}: status={status}, opc={opc}" + (f", reason={entry.get('error_message', 'unknown error')}" if status != "success" else ""))
 
     if opc and "OPC" in col_map:
         sheet_updates.append({"range": f"{col_letter(col_map['OPC'])}{row_index}", "values": [[opc]]})

@@ -183,7 +183,7 @@ def to_jpg(url):
     return url
 
 
-def empty_ebay_response(item_id=""):
+def empty_ebay_response():
     return {
         "stock": 0,
         "price": 0,
@@ -192,7 +192,7 @@ def empty_ebay_response(item_id=""):
         "additional_images": [],
         "title": "",
         "brand": "",
-        "product_code": item_id,
+        "product_code": "",
         "condition": "",
     }
 
@@ -200,12 +200,15 @@ def empty_ebay_response(item_id=""):
 _BARCODE_ASPECT_NAMES = ("EAN", "GTIN", "UPC", "ISBN")
 
 
-def extract_product_code(data, fallback):
+def extract_product_code(data):
     """Look for a real barcode (EAN/GTIN/UPC/ISBN) in eBay's item aspects -
-    same array already parsed for Brand, no extra API call. Falls back to the
-    eBay item ID (always available) so every row gets a stable identifier
-    even when the listing has no barcode specified. Used to auto-assign a
-    SKU for rows where an employee only pasted the sourcing link.
+    same array already parsed for Brand, no extra API call. Returns "" when
+    the listing has no barcode specified. This is purely informational (the
+    Sheet/Supabase "EAN" column) - it is NOT what gets sent to OnBuy as the
+    product code. OnBuy uses the seller's own SKU for that instead (see the
+    main loop), since the eBay item ID looked plausible as a fallback here
+    but isn't a real barcode and got create_product rejected outright with
+    "not a valid product code" when tried.
     """
     for aspect in data.get("localizedAspects", []):
         name = aspect.get("name", "").strip().upper()
@@ -215,7 +218,7 @@ def extract_product_code(data, fallback):
             digits = re.sub(r"\D", "", str(raw))
             if digits:
                 return digits
-    return fallback
+    return ""
 
 
 # ================= EBAY TOKEN =================
@@ -329,13 +332,13 @@ def get_ebay_data(url, token):
 
     if data is None:
         logger.info("REMOVED LISTING: %s", item_id)
-        return False, empty_ebay_response(item_id)
+        return False, empty_ebay_response()
 
     price_data = data.get("price", {}) or {}
     price = float(price_data.get("value", 0) or 0)
     if price <= 0:
         logger.info("NO PRICE: %s", item_id)
-        return False, empty_ebay_response(item_id)
+        return False, empty_ebay_response()
 
     estimated = data.get("estimatedAvailabilities", [])
     stock = 5
@@ -343,7 +346,7 @@ def get_ebay_data(url, token):
         status = estimated[0].get("estimatedAvailabilityStatus", "")
         if status in ("OUT_OF_STOCK", "UNAVAILABLE"):
             logger.info("OUT OF STOCK: %s", item_id)
-            return False, empty_ebay_response(item_id)
+            return False, empty_ebay_response()
         stock = estimated[0].get("estimatedAvailableQuantity", 5)
     if not stock or stock <= 0:
         stock = 5
@@ -372,7 +375,7 @@ def get_ebay_data(url, token):
             values = aspect.get("value", "")
             brand = values[0] if isinstance(values, list) else values
 
-    product_code = extract_product_code(data, fallback=item_id)
+    product_code = extract_product_code(data)
     condition = data.get("condition") or "New"
 
     return True, {
@@ -647,7 +650,10 @@ def main():
         # Runs before the sheet write below so the outcome (Sync Status, OPC
         # placeholder, etc.) can go into the SAME batch_update call instead of
         # a second Sheets API round-trip per row.
-        ean = ebay_data.get("product_code") or sku
+        # EAN column (Sheet/Supabase) is purely informational - whatever real
+        # barcode eBay has, or blank if it has none. NOT sent to OnBuy - see
+        # below.
+        ean = ebay_data.get("product_code") or ""
         sync_status = None
         onbuy_product_created = None
         onbuy_listing_active = None
@@ -656,10 +662,17 @@ def main():
 
         if sku and onbuy_ready and should_push_to_onbuy(sku) and onbuy_pushes_this_run < ONBUY_MAX_PUSHES_PER_RUN:
             onbuy_pushes_this_run += 1
+            # OnBuy's product code = the seller's own SKU, not the eBay-sourced
+            # EAN above - SKUs here are the seller's pre-validated UPCs (numeric
+            # by convention). Only forward it if it's actually all-digits, so a
+            # non-numeric SKU (a different convention, or a typo) can't repeat
+            # the same "not a valid product code" rejection a fabricated
+            # eBay-derived value caused.
+            upc_for_onbuy = sku if sku.isdigit() else ""
             try:
                 action, result = onbuy.sync_product(
                     sku=sku,
-                    ean=ean,
+                    ean=upc_for_onbuy,
                     title=title or str(row.get("Title") or ""),
                     description=description,
                     brand=brand,

@@ -77,8 +77,16 @@ filled in - both are required; OnBuy rejects duplicate SKUs, so this isn't
 auto-generated. If two rows ever end up with the same SKU by mistake (e.g. a
 copy-pasted row), the database export drops the older duplicate and logs a
 warning naming the SKU to fix - it won't silently corrupt the run, but the
-Sheet still needs a human to correct the duplicate. Everything else fills in
-on the next run:
+Sheet still needs a human to correct the duplicate.
+
+**The SKU must be numeric and a real, valid UPC** - it's what gets sent to
+OnBuy as the product's barcode/product code (not the `EAN` column below,
+which is just whatever eBay happens to report and is often blank for
+unbranded listings). OnBuy validates this as a real barcode and rejects the
+listing outright if it isn't one - a non-numeric SKU is sent to OnBuy as
+blank instead of risking a rejected/failed listing.
+
+Everything else fills in on the next run:
 
 - **Category**: auto-matched against `onbuy_categories_only.csv` using the
   fetched title/description.
@@ -110,7 +118,7 @@ of these if they don't match what you intended:
 | `Supplier` | Always `"eBay"` for now - ready for when Amazon is added |
 | `Category ID` | The numeric OnBuy category ID resolved for the matched category |
 | `Profit %` / `Fee %` | The actual `pricing.py` constants used for that row's price |
-| `EAN` | The real extracted barcode when eBay has one - may differ from `SKU` if your SKU convention isn't itself a barcode. Also written to the Sheet's `EAN` column if it exists. |
+| `EAN` | The real barcode extracted from eBay's listing data, when it has one - blank otherwise. Informational only; also written to the Sheet's `EAN` column if it exists. **Not** what's sent to OnBuy - see below. |
 | `Sync Status` / `OnBuy Product Created` / `OnBuy Listing Active` / `OnBuy Product ID` / `Last OnBuy Sync` | Updated to fresh values when an OnBuy push was actually attempted that row this run (`ONBUY_API_PUSH_ENABLED`); otherwise carried forward unchanged from whatever Supabase already had, so these never get blanked out on a run that doesn't touch OnBuy. Also written to the Sheet where those columns exist. (These live on the same upsert as everything else in this table - Postgres validates NOT NULL columns before it even looks at ON CONFLICT, so a separate partial-column upsert for just these fields can't work here.) |
 | `OPC` | Placeholder `"PENDING"` at first - OnBuy only assigns the real OPC after its async approval queue clears. `backfill_onbuy_status.py` runs hourly (see workflow) to find the real value and confirmed status, writing it to both the Sheet and here. |
 | `Price Check Flag` | See "Adding new products" above - also written to the Sheet. |
