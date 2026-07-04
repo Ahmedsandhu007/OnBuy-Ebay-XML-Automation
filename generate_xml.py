@@ -109,7 +109,7 @@ def to_jpg(url):
     return url
 
 
-def empty_ebay_response():
+def empty_ebay_response(item_id=""):
     return {
         "stock": 0,
         "price": 0,
@@ -118,7 +118,29 @@ def empty_ebay_response():
         "additional_images": [],
         "title": "",
         "brand": "",
+        "product_code": item_id,
     }
+
+
+_BARCODE_ASPECT_NAMES = ("EAN", "GTIN", "UPC", "ISBN")
+
+
+def extract_product_code(data, fallback):
+    """Look for a real barcode (EAN/GTIN/UPC/ISBN) in eBay's item aspects -
+    same array already parsed for Brand, no extra API call. Falls back to the
+    eBay item ID (always available) so every row gets a stable identifier
+    even when the listing has no barcode specified. Used to auto-assign a
+    SKU for rows where an employee only pasted the sourcing link.
+    """
+    for aspect in data.get("localizedAspects", []):
+        name = aspect.get("name", "").strip().upper()
+        if name in _BARCODE_ASPECT_NAMES:
+            values = aspect.get("value", "")
+            raw = values[0] if isinstance(values, list) else values
+            digits = re.sub(r"\D", "", str(raw))
+            if digits:
+                return digits
+    return fallback
 
 
 # ================= EBAY TOKEN =================
@@ -232,13 +254,13 @@ def get_ebay_data(url, token):
 
     if data is None:
         logger.info("REMOVED LISTING: %s", item_id)
-        return False, empty_ebay_response()
+        return False, empty_ebay_response(item_id)
 
     price_data = data.get("price", {}) or {}
     price = float(price_data.get("value", 0) or 0)
     if price <= 0:
         logger.info("NO PRICE: %s", item_id)
-        return False, empty_ebay_response()
+        return False, empty_ebay_response(item_id)
 
     estimated = data.get("estimatedAvailabilities", [])
     stock = 5
@@ -246,7 +268,7 @@ def get_ebay_data(url, token):
         status = estimated[0].get("estimatedAvailabilityStatus", "")
         if status in ("OUT_OF_STOCK", "UNAVAILABLE"):
             logger.info("OUT OF STOCK: %s", item_id)
-            return False, empty_ebay_response()
+            return False, empty_ebay_response(item_id)
         stock = estimated[0].get("estimatedAvailableQuantity", 5)
     if not stock or stock <= 0:
         stock = 5
@@ -275,6 +297,8 @@ def get_ebay_data(url, token):
             values = aspect.get("value", "")
             brand = values[0] if isinstance(values, list) else values
 
+    product_code = extract_product_code(data, fallback=item_id)
+
     return True, {
         "stock": stock,
         "price": price,
@@ -283,6 +307,7 @@ def get_ebay_data(url, token):
         "additional_images": additional_images,
         "title": title,
         "brand": brand,
+        "product_code": product_code,
     }
 
 
@@ -425,6 +450,18 @@ def main():
         stock = ebay_data["stock"]
         cost_price = ebay_data["price"]
 
+        # ================= SKU (auto-assigned if the employee only pasted the URL) =================
+        sku = str(row.get("SKU") or "").strip()
+        sku_needs_write = False
+        if not sku:
+            sku = str(ebay_data.get("product_code") or "").strip()
+            if sku:
+                sku_needs_write = True
+                logger.info("Row %d: no SKU provided, auto-assigned %s", i, sku)
+            else:
+                logger.warning("Row %d: no SKU provided and could not derive one from %s - skipping", i, url)
+                continue
+
         # ================= PRICING =================
         shipping_cost = float(row.get("Shipping Cost (£)") or 0)
         selling_price = 0 if stock == 0 else pricing.calculate_selling_price(cost_price, shipping_cost)
@@ -444,6 +481,8 @@ def main():
             {"range": f"{col_letter(col_map['Last Updated'])}{i}", "values": [[datetime.now(PK_TZ).strftime("%Y-%m-%d %H:%M:%S")]]},
             {"range": f"{col_letter(col_map['Last Checked Time'])}{i}", "values": [[datetime.now(PK_TZ).strftime("%Y-%m-%d %H:%M:%S")]]},
         ]
+        if sku_needs_write:
+            updates.append({"range": f"{col_letter(col_map['SKU'])}{i}", "values": [[sku]]})
 
         try:
             with_retry(sheet.batch_update, updates, what=f"sheet update row {i}", max_attempts=3)
@@ -457,7 +496,6 @@ def main():
         time.sleep(0.5)  # keep the Sheets API write rate gentle, as the original pipeline did
 
         # ================= ONBUY API PUSH (gated, see ONBUY_API_PUSH_ENABLED) =================
-        sku = str(row.get("SKU") or "").strip()
         if sku and onbuy_ready and should_push_to_onbuy(sku):
             try:
                 category_path = clean_category(row.get("Category"))
