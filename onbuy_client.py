@@ -171,17 +171,21 @@ class OnBuyClient:
         return with_retry(_do_list, what="onbuy list_listings", max_attempts=3)
 
     def check_queue(self, queue_id):
-        """GET /v2/queues/{queue_id} - per OnBuy support (2026-07-02): a
+        """GET /v2/queues?queue_id=... - per OnBuy support (2026-07-02): a
         queue_id from POST /v2/products only means "accepted for async
         processing," not "created." This checks whether that submission has
         succeeded, is still pending, or failed - and, unlike the create
         response itself, surfaces the actual validation/processing error.
+
+        Passed as a query param, not a URL path segment - putting it in the
+        path (/v2/queues/{queue_id}) got back "'' is not a valid queue_id",
+        meaning OnBuy's router wasn't reading it from the path at all.
         """
         def _do_check():
             resp = requests.get(
-                f"{BASE_URL}/queues/{queue_id}",
+                f"{BASE_URL}/queues",
                 headers=self._headers(),
-                params={"site_id": self.site_id},
+                params={"site_id": self.site_id, "queue_id": queue_id},
                 timeout=30,
             )
             logger.info("OnBuy check_queue(%s) raw response [%s]: %s", queue_id, resp.status_code, resp.text[:3000])
