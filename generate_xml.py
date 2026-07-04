@@ -261,11 +261,17 @@ def _is_item_group_error(resp):
 def _fetch_item_group_as_item(item_group_id, token):
     """Some eBay listings are multi-variation ("item group") listings - e.g.
     a listing with size/color options - which get_item_by_legacy_id rejects
-    with errorId 11006, pointing at this endpoint instead. Picks the first
-    variation as a representative item and reshapes the response so the rest
-    of get_ebay_data's parsing works unchanged. If your SKU is meant to track
-    a *specific* variation rather than "whichever eBay lists first", check the
-    chosen item_id logged below against what you expect.
+    with errorId 11006, pointing at this endpoint instead.
+
+    item_group_id here is the specific legacy item ID the Sheet row's URL
+    actually linked to (that's what triggered the 11006 error in the first
+    place), so match it back against the group's returned items and use that
+    *exact* variation's own title/description/images/price. Only falls back
+    to the first item in the group if no exact match is found - previously
+    this always used the first item regardless of which variation was
+    linked, which is the likely cause of unrelated rows appearing to share
+    one variation's description (they'd all resolve to whichever variation
+    the API happened to list first for that group).
     """
     resp = requests.get(
         "https://api.ebay.com/buy/browse/v1/item/get_items_by_item_group",
@@ -280,12 +286,20 @@ def _fetch_item_group_as_item(item_group_id, token):
     if not items:
         return None
 
-    chosen = items[0]
-    logger.info(
-        "Item %s is a multi-variation listing - using variation %s",
-        item_group_id,
-        chosen.get("legacyItemId") or chosen.get("itemId"),
+    chosen = next(
+        (item for item in items if str(item.get("legacyItemId") or "") == str(item_group_id)),
+        None,
     )
+    if chosen is not None:
+        logger.info("Item %s is a multi-variation listing - using its own linked variation", item_group_id)
+    else:
+        chosen = items[0]
+        logger.warning(
+            "Item %s is a multi-variation listing but its own variation wasn't found among "
+            "the %d returned - falling back to variation %s, title/description/price may not "
+            "match what this row's link actually points to",
+            item_group_id, len(items), chosen.get("legacyItemId") or chosen.get("itemId"),
+        )
 
     description = chosen.get("description")
     if not description:
