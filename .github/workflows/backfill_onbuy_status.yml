@@ -5,6 +5,13 @@ on:
     - cron: "15 * * * *"   # hourly, offset from the main sync's :00 slot
   workflow_dispatch:
 
+# Shares the main sync workflow's concurrency group: requesting a new OnBuy
+# token supersedes the one a still-running sync is using (mass mid-run 401s,
+# seen 2026-07-06), so queue behind it instead of overlapping.
+concurrency:
+  group: onbuy-api
+  cancel-in-progress: false
+
 jobs:
   backfill:
     runs-on: ubuntu-latest

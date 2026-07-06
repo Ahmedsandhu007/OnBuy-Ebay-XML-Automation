@@ -5,6 +5,17 @@ on:
     - cron: "0 */3 * * *"   # every 3 hours
   workflow_dispatch:
 
+# Never let two OnBuy-touching runs execute at the same time - they share the
+# same 240-calls/hour API quota AND a fresh token from one run supersedes the
+# other's mid-flight (confirmed 2026-07-06: a manual run overlapping the
+# scheduled one produced mass "rate limited" + 401 "badToken" failures, and
+# both runs create-raced the same brand-new SKUs). Same group as the hourly
+# backfill workflow so that queues behind a sync run too instead of
+# overlapping it.
+concurrency:
+  group: onbuy-api
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest

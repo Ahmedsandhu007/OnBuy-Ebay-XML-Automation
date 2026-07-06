@@ -19,7 +19,7 @@ import pricing
 import storage
 import supabase_db
 from onbuy_client import OnBuyClient
-from retry_utils import AuthError, PermanentError, TransientError, raise_for_status, with_retry
+from retry_utils import AuthError, PermanentError, RateLimitError, TransientError, raise_for_status, with_retry
 from sanitize import sanitize_description, validate_images
 
 # ================= LOGGING =================
@@ -595,6 +595,8 @@ def main():
     onbuy_failed = 0
     onbuy_removed = 0
     onbuy_deferred = 0  # created earlier, listing not yet updatable on OnBuy's side
+    onbuy_postponed = 0  # transient OnBuy/transport trouble - status left untouched, retried next run
+    onbuy_halt_reason = None  # set when pushing must stop for the rest of the run (rate limit / dead token)
     onbuy_pushes_this_run = 0
     rows_to_delete = []  # Sheet row numbers to remove entirely - see the
     # "supplied brand is owned by another seller" check below. Applied after
@@ -742,7 +744,8 @@ def main():
         onbuy_product_id = None
         last_onbuy_sync = None
 
-        if sku and onbuy_ready and should_push_to_onbuy(sku) and onbuy_pushes_this_run < ONBUY_MAX_PUSHES_PER_RUN:
+        if (sku and onbuy_ready and onbuy_halt_reason is None
+                and should_push_to_onbuy(sku) and onbuy_pushes_this_run < ONBUY_MAX_PUSHES_PER_RUN):
             existing = existing_fields.get(sku, {})
             # Supabase first, Sheet as fallback - the Sheet carries the same
             # tracking columns (backfill writes both), so the guard below
@@ -837,6 +840,31 @@ def main():
                     sync_status = "Synced"
                     onbuy_product_created = "TRUE"
                     onbuy_listing_active = "TRUE"
+            except (TransientError, AuthError, requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+                # OnBuy-side or transport trouble (rate limit, 5xx after
+                # retries, expired token even after the client's one re-auth,
+                # network blip) - the product itself was NOT rejected, so
+                # leave Sync Status exactly as it was: writing "Failed" here
+                # would reopen the create fallback for a recently created row
+                # whose real OPC hasn't been backfilled yet, and re-creating
+                # is exactly how the 07-06 duplicates were minted. No Last
+                # OnBuy Sync stamp either, so these rows keep their place at
+                # the front of the push order next run.
+                # (AuthError subclasses PermanentError, so it must be listed
+                # here, before the PermanentError handler below.)
+                onbuy_postponed += 1
+                run_had_errors = True
+                logger.warning("OnBuy push postponed for SKU %s: %s", sku, exc)
+                if isinstance(exc, (RateLimitError, AuthError)):
+                    # The hourly quota won't come back mid-run, and a token
+                    # that couldn't be refreshed won't start working again -
+                    # pushing on would just burn time failing row after row.
+                    onbuy_halt_reason = str(exc)[:200]
+                    logger.warning(
+                        "Halting OnBuy pushes for the rest of this run (%s) - remaining rows "
+                        "still get their Sheet/Supabase refresh and will push next run",
+                        onbuy_halt_reason,
+                    )
             except PermanentError as exc:
                 if already_created and "SKU does not exist" in str(exc):
                     # Created earlier, OnBuy just hasn't made the listing
@@ -1089,18 +1117,23 @@ def main():
     # ================= FINAL LOGS + ALERTS =================
     logger.info("DONE")
     logger.info("Updated rows: %d", updated_count)
-    logger.info("OnBuy: %d created, %d updated, %d deferred (awaiting go-live), %d failed, %d removed (brand rejected)",
-                 onbuy_created, onbuy_updated, onbuy_deferred, onbuy_failed, onbuy_removed)
+    logger.info("OnBuy: %d created, %d updated, %d deferred (awaiting go-live), %d postponed (transient), "
+                 "%d failed, %d removed (brand rejected)",
+                 onbuy_created, onbuy_updated, onbuy_deferred, onbuy_postponed, onbuy_failed, onbuy_removed)
+    if onbuy_halt_reason:
+        logger.warning("OnBuy pushes were halted early this run: %s", onbuy_halt_reason)
     logger.info("Feed products: %d, skipped: %d", feed_count, skipped_feed)
     logger.info("Feed URL: %s", feed_url or "(not uploaded - see SUPABASE_URL/SUPABASE_SERVICE_KEY)")
     logger.info("Supabase database export: %s (%d rows)", "OK" if supabase_ok else "skipped/failed", len(supabase_rows))
 
-    if fetch_failures >= FETCH_FAILURE_ALERT_THRESHOLD or onbuy_failed > 0 or onbuy_removed > 0:
+    if fetch_failures >= FETCH_FAILURE_ALERT_THRESHOLD or onbuy_failed > 0 or onbuy_removed > 0 or onbuy_postponed > 0:
         notify.send_alert_email(
-            "Sync run finished with errors" if (fetch_failures or onbuy_failed) else "Sync run removed brand-rejected product(s)",
+            "Sync run finished with errors" if (fetch_failures or onbuy_failed or onbuy_postponed) else "Sync run removed brand-rejected product(s)",
             f"eBay fetch failures: {fetch_failures}\n"
             f"OnBuy push failures: {onbuy_failed} (created {onbuy_created}, updated {onbuy_updated}, "
             f"deferred awaiting go-live {onbuy_deferred})\n"
+            f"OnBuy pushes postponed (rate limit/token/network - auto-retried next run): {onbuy_postponed}"
+            + (f" - pushing halted early: {onbuy_halt_reason}" if onbuy_halt_reason else "") + "\n"
             f"Rows removed (brand owned by another seller): {onbuy_removed}"
             + (f" - SKUs: {', '.join(removed_skus)}" if removed_skus else "") + "\n"
             f"Updated rows: {updated_count}\n"

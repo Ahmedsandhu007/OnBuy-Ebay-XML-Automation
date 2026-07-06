@@ -104,6 +104,23 @@ class OnBuyClient:
         # - matches the already-verified test_create_product.py/test_update_listing.py behavior.
         return {"Authorization": self._token, "Content-Type": "application/json"}
 
+    def _send(self, method, url, *, what, **kwargs):
+        """requests.request with one automatic re-auth on a 401. The token is
+        fetched once at run start, but it can die mid-run: OnBuy tokens
+        expire, and any other workflow requesting a token with the same
+        credentials (e.g. the hourly backfill firing while a long sync run
+        is still going) can supersede it - confirmed 2026-07-06 when a run
+        overlapping another one started getting 401 "badToken" on every call
+        partway through. Refresh once and repeat the call instead of failing
+        every remaining push in the run.
+        """
+        kwargs.setdefault("timeout", 60)
+        resp = requests.request(method, url, headers=self._headers(), **kwargs)
+        if resp.status_code == 401 and self.authenticate():
+            logger.info("%s: OnBuy token rejected mid-run - re-authenticated, retrying once", what)
+            resp = requests.request(method, url, headers=self._headers(), **kwargs)
+        return resp
+
     def create_product(self, *, sku, ean, title, description, brand, category_id, price, main_image, additional_images):
         payload = {
             "site_id": self.site_id,
@@ -129,7 +146,7 @@ class OnBuyClient:
 
         def _do_create():
             logger.info("OnBuy create_product(%s) request payload: %s", sku, payload)
-            resp = requests.post(f"{BASE_URL}/products", json=payload, headers=self._headers(), timeout=60)
+            resp = self._send("POST", f"{BASE_URL}/products", what=f"onbuy create_product({sku})", json=payload)
             logger.info("OnBuy create_product(%s) raw response [%s]: %s", sku, resp.status_code, resp.text[:2000])
             raise_for_status(resp, what=f"onbuy create_product({sku})")
             body = resp.json()
@@ -147,7 +164,7 @@ class OnBuyClient:
 
         def _do_update():
             logger.info("OnBuy update_listing(%s) request payload: %s", sku, payload)
-            resp = requests.put(f"{BASE_URL}/listings/by-sku", json=payload, headers=self._headers(), timeout=60)
+            resp = self._send("PUT", f"{BASE_URL}/listings/by-sku", what=f"onbuy update_listing({sku})", json=payload)
             logger.info("OnBuy update_listing(%s) raw response [%s]: %s", sku, resp.status_code, resp.text[:2000])
             raise_for_status(resp, what=f"onbuy update_listing({sku})")
             body = resp.json()
@@ -164,11 +181,9 @@ class OnBuyClient:
         sandbox data, so this is the sole ground truth for sandbox testing.
         """
         def _do_list():
-            resp = requests.get(
-                f"{BASE_URL}/listings",
-                headers=self._headers(),
-                params={"site_id": self.site_id},
-                timeout=30,
+            resp = self._send(
+                "GET", f"{BASE_URL}/listings", what="onbuy list_listings",
+                params={"site_id": self.site_id}, timeout=30,
             )
             logger.info("OnBuy list_listings raw response [%s]: %s", resp.status_code, resp.text[:3000])
             raise_for_status(resp, what="onbuy list_listings")
@@ -188,11 +203,9 @@ class OnBuyClient:
         meaning OnBuy's router wasn't reading it from the path at all.
         """
         def _do_check():
-            resp = requests.get(
-                f"{BASE_URL}/queues",
-                headers=self._headers(),
-                params={"site_id": self.site_id, "queue_id": queue_id},
-                timeout=30,
+            resp = self._send(
+                "GET", f"{BASE_URL}/queues", what=f"onbuy check_queue({queue_id})",
+                params={"site_id": self.site_id, "queue_id": queue_id}, timeout=30,
             )
             logger.info("OnBuy check_queue(%s) raw response [%s]: %s", queue_id, resp.status_code, resp.text[:3000])
             raise_for_status(resp, what=f"onbuy check_queue({queue_id})")
@@ -208,11 +221,9 @@ class OnBuyClient:
         (which is the SKU). Used by backfill_onbuy_status.py.
         """
         def _do_list():
-            resp = requests.get(
-                f"{BASE_URL}/queues",
-                headers=self._headers(),
-                params={"site_id": self.site_id, "limit": limit, "offset": offset},
-                timeout=30,
+            resp = self._send(
+                "GET", f"{BASE_URL}/queues", what=f"onbuy list_queue(offset={offset})",
+                params={"site_id": self.site_id, "limit": limit, "offset": offset}, timeout=30,
             )
             raise_for_status(resp, what=f"onbuy list_queue(offset={offset})")
             return resp.json()
