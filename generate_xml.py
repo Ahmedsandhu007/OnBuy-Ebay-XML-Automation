@@ -119,6 +119,34 @@ def parse_time(value):
         return datetime(2000, 1, 1)
 
 
+def is_valid_gtin(code):
+    """True if `code` is a real barcode by the GS1 check-digit standard used
+    for UPC-A/EAN-8/EAN-13/GTIN-14 (all the same algorithm, just different
+    lengths). Being all-digits and the right length isn't enough - OnBuy
+    validates the actual check digit and rejects create_product outright
+    with "not a valid product code" otherwise, which happened for two SKUs
+    that were numeric and 12 digits long but not real barcodes."""
+    if not code.isdigit() or len(code) not in (8, 12, 13, 14):
+        return False
+    body, check_digit = code[:-1], code[-1]
+    total = sum(int(d) * (3 if i % 2 == 0 else 1) for i, d in enumerate(reversed(body)))
+    return str((10 - total % 10) % 10) == check_digit
+
+
+# Values eBay sellers sometimes put in the "Brand" aspect that are not
+# actually a brand name - typically someone answering a yes/no-style prompt
+# literally ("Branded") rather than naming the brand. User's explicit policy
+# (2026-07-04): normalize all of these to "Unbranded" rather than pass a
+# placeholder through as if it were a real brand.
+_NON_BRAND_VALUES = {"branded", "unbranded", "no brand", "none", "n/a", "na", "generic", ""}
+
+
+def normalize_brand(brand):
+    if str(brand).strip().lower() in _NON_BRAND_VALUES:
+        return "Unbranded"
+    return brand
+
+
 def dedupe_rows_by_sku(rows, what):
     """Postgres/PostgREST rejects a whole bulk upsert if two rows in the same
     call share the same SKU (the conflict target) - "ON CONFLICT DO UPDATE
@@ -388,6 +416,7 @@ def get_ebay_data(url, token):
         if aspect.get("name", "").lower() == "brand":
             values = aspect.get("value", "")
             brand = values[0] if isinstance(values, list) else values
+    brand = normalize_brand(brand)
 
     product_code = extract_product_code(data)
     condition = data.get("condition") or "New"
@@ -605,7 +634,7 @@ def main():
         else:
             title = str(row.get("Title") or "")
             description = str(row.get("Description") or "")
-            brand = str(row.get("Brand") or "")
+            brand = normalize_brand(str(row.get("Brand") or ""))
             main_image = str(row.get("Image URL") or "")
             additional_images = [img.strip() for img in str(row.get("Additional Images") or "").split(",") if img.strip()]
 
@@ -677,19 +706,36 @@ def main():
         if sku and onbuy_ready and should_push_to_onbuy(sku) and onbuy_pushes_this_run < ONBUY_MAX_PUSHES_PER_RUN:
             onbuy_pushes_this_run += 1
             # OnBuy's product code = the seller's own SKU, not the eBay-sourced
-            # EAN above - SKUs here are the seller's pre-validated UPCs (numeric
-            # by convention). Only forward it if it's actually all-digits, so a
-            # non-numeric SKU (a different convention, or a typo) can't repeat
-            # the same "not a valid product code" rejection a fabricated
-            # eBay-derived value caused.
-            upc_for_onbuy = sku if sku.isdigit() else ""
+            # EAN above - SKUs here are the seller's pre-validated UPCs. Being
+            # numeric and the right length isn't enough on its own - confirmed
+            # two real SKUs got rejected ("not a valid product code") despite
+            # both being 12-digit numbers, because their check digit isn't a
+            # real GS1/UPC checksum. Only forward it if it actually passes
+            # that check; otherwise send blank rather than repeat the rejection.
+            upc_for_onbuy = sku if is_valid_gtin(sku) else ""
+
+            # Two distinct OnBuy-side reasons a brand name gets rejected: their
+            # brand-matching backend crashes outright on one it doesn't
+            # recognize ("MatchedBrandData...Argument #1 ($id) must be of
+            # type int, null given" - a bug on their end), or the brand is a
+            # registered trademark another seller already owns on OnBuy (a
+            # real policy, not a bug - user's explicit call: mark these
+            # unbranded rather than pursue brand rights). Both get the same
+            # treatment: if the last attempt for this SKU hit either one,
+            # retry as "Unbranded" instead of repeating the same rejection.
+            brand_for_onbuy = brand
+            last_sync_status = str(existing_fields.get(sku, {}).get("Sync Status") or "")
+            if ("MatchedBrandData::__construct" in last_sync_status
+                    or "supplied brand is owned by another seller" in last_sync_status):
+                brand_for_onbuy = "Unbranded"
+
             try:
                 action, result = onbuy.sync_product(
                     sku=sku,
                     ean=upc_for_onbuy,
                     title=title or str(row.get("Title") or ""),
                     description=description,
-                    brand=brand,
+                    brand=brand_for_onbuy,
                     category_id=category_id,
                     price=selling_price,
                     stock=stock,
@@ -716,7 +762,10 @@ def main():
             except Exception as exc:
                 onbuy_failed += 1
                 run_had_errors = True
-                sync_status = "Failed"
+                # Previously just "Failed" with no reason - the actual cause
+                # only ever reached the run's log, not anywhere the user could
+                # see it without downloading that specific Actions run's log.
+                sync_status = f"Failed: {str(exc)[:300]}"
                 logger.error("OnBuy push failed for SKU %s: %s", sku, exc)
             # Confirmed from the account's own API usage page: 240 PUT/POST per
             # hour. Paired with ONBUY_MAX_PUSHES_PER_RUN above, this keeps a

@@ -79,12 +79,15 @@ copy-pasted row), the database export drops the older duplicate and logs a
 warning naming the SKU to fix - it won't silently corrupt the run, but the
 Sheet still needs a human to correct the duplicate.
 
-**The SKU must be numeric and a real, valid UPC** - it's what gets sent to
-OnBuy as the product's barcode/product code (not the `EAN` column below,
-which is just whatever eBay happens to report and is often blank for
-unbranded listings). OnBuy validates this as a real barcode and rejects the
-listing outright if it isn't one - a non-numeric SKU is sent to OnBuy as
-blank instead of risking a rejected/failed listing.
+**The SKU must be a real, valid UPC** - it's what gets sent to OnBuy as the
+product's barcode/product code (not the `EAN` column below, which is just
+whatever eBay happens to report and is often blank for unbranded listings).
+Being numeric and the right length (8/12/13/14 digits) isn't enough on its
+own - OnBuy checks the actual GS1 check digit and rejects the listing
+outright if it doesn't compute correctly, so double-check a SKU is a real
+UPC (not just a numeric ID) before entering it - a real barcode lookup/
+generator will confirm the check digit is valid. A SKU that fails this
+check is sent to OnBuy as blank instead of risking a rejected listing.
 
 Everything else fills in on the next run:
 
