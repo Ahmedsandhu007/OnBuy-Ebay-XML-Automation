@@ -593,7 +593,14 @@ def main():
     onbuy_created = 0
     onbuy_updated = 0
     onbuy_failed = 0
+    onbuy_removed = 0
     onbuy_pushes_this_run = 0
+    rows_to_delete = []  # Sheet row numbers to remove entirely - see the
+    # "supplied brand is owned by another seller" check below. Applied after
+    # every other Sheet write this run, in descending row order, so deleting
+    # one doesn't shift the row numbers the other writes/highlights already
+    # targeted.
+    removed_skus = []  # matching SKUs, for the Supabase delete + summary log
     supabase_rows = []  # one upsert for the whole run - every row must have
     # identical keys (PostgREST's bulk-upsert requirement) AND every NOT NULL
     # column must be present (Postgres validates that on the candidate insert
@@ -719,6 +726,24 @@ def main():
         last_onbuy_sync = None
 
         if sku and onbuy_ready and should_push_to_onbuy(sku) and onbuy_pushes_this_run < ONBUY_MAX_PUSHES_PER_RUN:
+            last_sync_status = str(existing_fields.get(sku, {}).get("Sync Status") or "")
+
+            # A brand that's a registered trademark another seller already
+            # owns on OnBuy isn't a bug to route around - it's a real product
+            # this business isn't allowed to list under that brand at all.
+            # User's explicit policy (2026-07-06, superseding the earlier
+            # "mark it Unbranded and relist" policy): remove the row entirely
+            # instead of relisting it as Unbranded.
+            if "supplied brand is owned by another seller" in last_sync_status:
+                rows_to_delete.append(i)
+                removed_skus.append(sku)
+                onbuy_removed += 1
+                logger.info(
+                    "Row %d (SKU %s): removing - OnBuy rejected the brand as owned "
+                    "by another seller; not relisting as Unbranded", i, sku,
+                )
+                continue
+
             onbuy_pushes_this_run += 1
             # OnBuy's product code = the seller's own SKU, not the eBay-sourced
             # EAN above - SKUs here are the seller's pre-validated UPCs. Being
@@ -729,19 +754,13 @@ def main():
             # that check; otherwise send blank rather than repeat the rejection.
             upc_for_onbuy = sku if is_valid_gtin(sku) else ""
 
-            # Two distinct OnBuy-side reasons a brand name gets rejected: their
-            # brand-matching backend crashes outright on one it doesn't
-            # recognize ("MatchedBrandData...Argument #1 ($id) must be of
-            # type int, null given" - a bug on their end), or the brand is a
-            # registered trademark another seller already owns on OnBuy (a
-            # real policy, not a bug - user's explicit call: mark these
-            # unbranded rather than pursue brand rights). Both get the same
-            # treatment: if the last attempt for this SKU hit either one,
-            # retry as "Unbranded" instead of repeating the same rejection.
+            # OnBuy's own brand-matching backend can also crash outright on a
+            # brand it doesn't recognize ("MatchedBrandData...Argument #1
+            # ($id) must be of type int, null given") - that's a bug on their
+            # end, unrelated to trademark ownership, so it still gets retried
+            # as Unbranded rather than repeating the same crash.
             brand_for_onbuy = brand
-            last_sync_status = str(existing_fields.get(sku, {}).get("Sync Status") or "")
-            if ("MatchedBrandData::__construct" in last_sync_status
-                    or "supplied brand is owned by another seller" in last_sync_status):
+            if "MatchedBrandData::__construct" in last_sync_status:
                 brand_for_onbuy = "Unbranded"
 
             try:
@@ -915,6 +934,48 @@ def main():
         except Exception as exc:
             logger.error("Row highlighting failed (values were still updated correctly): %s", exc)
 
+    # ================= REMOVE BRAND-REJECTED ROWS ENTIRELY =================
+    # Runs after every other Sheet write/highlight above so deleting these
+    # rows can't shift row numbers out from under one of those, which only
+    # ever target rows that are staying (a row queued for deletion `continue`d
+    # past building any Sheet update for itself). Supabase is deleted first,
+    # not the Sheet row - if the Sheet delete then fails, the row survives to
+    # be retried (and re-rejected, re-detected, re-deleted) next run; the
+    # reverse order would risk a permanently orphaned Supabase row with no
+    # Sheet row left to ever trigger cleaning it up.
+    if rows_to_delete:
+        supabase_db.delete_products(removed_skus)
+        delete_requests = [
+            {
+                "deleteDimension": {
+                    "range": {
+                        "sheetId": sheet.id,
+                        "dimension": "ROWS",
+                        "startIndex": row_num - 1,
+                        "endIndex": row_num,
+                    }
+                }
+            }
+            for row_num in sorted(set(rows_to_delete), reverse=True)
+        ]
+        try:
+            with_retry(
+                sheet.spreadsheet.batch_update,
+                {"requests": delete_requests},
+                what="delete brand-rejected rows",
+                max_attempts=3,
+            )
+            logger.info(
+                "Removed %d row(s) entirely - brand owned by another seller (SKUs: %s)",
+                len(rows_to_delete), ", ".join(removed_skus),
+            )
+        except Exception as exc:
+            run_had_errors = True
+            logger.error(
+                "Failed to delete brand-rejected row(s) from the Sheet (Supabase row(s) "
+                "already removed) - SKUs %s: %s", ", ".join(removed_skus), exc,
+            )
+
     # ================= GENERATE XML (kept as fallback) =================
     root = ET.Element("products")
     feed_count = 0
@@ -962,16 +1023,19 @@ def main():
     # ================= FINAL LOGS + ALERTS =================
     logger.info("DONE")
     logger.info("Updated rows: %d", updated_count)
-    logger.info("OnBuy: %d created, %d updated, %d failed", onbuy_created, onbuy_updated, onbuy_failed)
+    logger.info("OnBuy: %d created, %d updated, %d failed, %d removed (brand rejected)",
+                 onbuy_created, onbuy_updated, onbuy_failed, onbuy_removed)
     logger.info("Feed products: %d, skipped: %d", feed_count, skipped_feed)
     logger.info("Feed URL: %s", feed_url or "(not uploaded - see SUPABASE_URL/SUPABASE_SERVICE_KEY)")
     logger.info("Supabase database export: %s (%d rows)", "OK" if supabase_ok else "skipped/failed", len(supabase_rows))
 
-    if fetch_failures >= FETCH_FAILURE_ALERT_THRESHOLD or onbuy_failed > 0:
+    if fetch_failures >= FETCH_FAILURE_ALERT_THRESHOLD or onbuy_failed > 0 or onbuy_removed > 0:
         notify.send_alert_email(
-            "Sync run finished with errors",
+            "Sync run finished with errors" if (fetch_failures or onbuy_failed) else "Sync run removed brand-rejected product(s)",
             f"eBay fetch failures: {fetch_failures}\n"
             f"OnBuy push failures: {onbuy_failed} (created {onbuy_created}, updated {onbuy_updated})\n"
+            f"Rows removed (brand owned by another seller): {onbuy_removed}"
+            + (f" - SKUs: {', '.join(removed_skus)}" if removed_skus else "") + "\n"
             f"Updated rows: {updated_count}\n"
             f"Feed products: {feed_count}, skipped: {skipped_feed}\n"
             "Check the GitHub Actions run log for details.",

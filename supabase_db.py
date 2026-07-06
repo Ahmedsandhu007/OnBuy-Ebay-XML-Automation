@@ -56,6 +56,46 @@ def upsert_products(rows):
     return True
 
 
+def delete_products(skus):
+    """Deletes these SKUs' rows entirely. Only used for the rare case where a
+    product must not exist at all (OnBuy rejected the brand as a registered
+    trademark another seller owns, and policy is to remove the row, not just
+    stop syncing it) - not a general-purpose bulk delete. Never raises -
+    returns True/False; a failed delete here doesn't crash the run, since the
+    Sheet row removal (the primary signal generate_xml.py's next run keys
+    off of) is a separate call.
+    """
+    if not skus:
+        return True
+
+    supabase_url = os.getenv("SUPABASE_URL")
+    service_key = os.getenv("SUPABASE_SERVICE_KEY")
+    if not supabase_url or not service_key:
+        logger.warning("SUPABASE_URL/SUPABASE_SERVICE_KEY not set - skipping database delete")
+        return False
+
+    endpoint = f"{supabase_url.rstrip('/')}/rest/v1/{TABLE_NAME}"
+    headers = {
+        "apikey": service_key,
+        "Authorization": f"Bearer {service_key}",
+        "Prefer": "return=minimal",
+    }
+    params = {"SKU": f"in.({','.join(skus)})"}
+
+    try:
+        resp = requests.delete(endpoint, headers=headers, params=params, timeout=30)
+    except requests.exceptions.RequestException as exc:
+        logger.error("Supabase database delete failed: %s", exc)
+        return False
+
+    if resp.status_code not in (200, 204):
+        logger.error("Supabase database delete failed (%s): %s", resp.status_code, resp.text[:500])
+        return False
+
+    logger.info("Supabase database export: deleted %d row(s) (%s)", len(skus), ", ".join(skus))
+    return True
+
+
 TRACKING_COLUMNS = (
     "OPC",
     "Sync Status",
