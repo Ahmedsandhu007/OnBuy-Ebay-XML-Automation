@@ -594,6 +594,7 @@ def main():
     onbuy_updated = 0
     onbuy_failed = 0
     onbuy_removed = 0
+    onbuy_deferred = 0  # created earlier, listing not yet updatable on OnBuy's side
     onbuy_pushes_this_run = 0
     rows_to_delete = []  # Sheet row numbers to remove entirely - see the
     # "supplied brand is owned by another seller" check below. Applied after
@@ -614,16 +615,32 @@ def main():
     # weren't a concern back when this was capped at a hardcoded 12/run.
     num_cols = len(headers)
 
+    batch = sorted_data[:MAX_PRODUCTS_PER_RUN]
+
+    # Within the selected batch, hand the limited OnBuy push slots
+    # (ONBUY_MAX_PUSHES_PER_RUN) to rows that have never been pushed first
+    # (blank "Last OnBuy Sync" parses to year 2000), then oldest-pushed.
+    # Without this, processing order == Last Checked Time order, which is
+    # stable across runs - so the same ~200 rows won the push slots every
+    # run and rows beyond the cap (including genuinely new, never-listed
+    # products) never reached OnBuy at all. Batch *selection* above stays
+    # based on Last Checked Time (eBay refresh fairness); this only reorders
+    # within the same set, so it changes who gets OnBuy slots, not which
+    # rows get their eBay/Sheet refresh. Skipped while a test-SKU allowlist
+    # is active so those keep absolute front-of-queue priority.
+    if not (ONBUY_API_PUSH_ENABLED and ONBUY_API_TEST_SKUS):
+        batch.sort(key=lambda x: parse_time(str(x[1].get("Last OnBuy Sync") or "")))
+
     # Pre-fetch OPC + OnBuy-tracking fields already on record for this run's
     # batch, so the single Supabase upsert (below) can carry forward real
     # values instead of blanking them out for rows not pushed to OnBuy this
     # run - see fetch_existing_fields() for why this has to be a single
     # always-full-row upsert rather than a separate partial-column one.
-    skus_in_batch = [str(row.get("SKU") or "").strip() for _, row in sorted_data[:MAX_PRODUCTS_PER_RUN]]
+    skus_in_batch = [str(row.get("SKU") or "").strip() for _, row in batch]
     skus_in_batch = [s for s in skus_in_batch if s]
     existing_fields = supabase_db.fetch_existing_fields(skus_in_batch)
 
-    for idx, row in sorted_data[:MAX_PRODUCTS_PER_RUN]:
+    for idx, row in batch:
         i = idx + 2
         url = str(row.get("Supplier URL", "")).strip()
 
@@ -726,7 +743,11 @@ def main():
         last_onbuy_sync = None
 
         if sku and onbuy_ready and should_push_to_onbuy(sku) and onbuy_pushes_this_run < ONBUY_MAX_PUSHES_PER_RUN:
-            last_sync_status = str(existing_fields.get(sku, {}).get("Sync Status") or "")
+            existing = existing_fields.get(sku, {})
+            # Supabase first, Sheet as fallback - the Sheet carries the same
+            # tracking columns (backfill writes both), so the guard below
+            # still works on a run where the Supabase pre-fetch failed.
+            last_sync_status = str(existing.get("Sync Status") or row.get("Sync Status") or "")
 
             # A brand that's a registered trademark another seller already
             # owns on OnBuy isn't a bug to route around - it's a real product
@@ -763,19 +784,42 @@ def main():
             if "MatchedBrandData::__construct" in last_sync_status:
                 brand_for_onbuy = "Unbranded"
 
+            # "SKU does not exist" from update_listing does NOT always mean
+            # the product was never created. OnBuy's queue confirms a creation
+            # as success (OPC issued, findable in the Add Listing search) days
+            # before the listing becomes addressable via PUT /listings/by-sku
+            # - and falling back to create_product in that window re-submits
+            # the same product, which OnBuy answers with a NEW OPC instead of
+            # matching the existing record (confirmed 2026-07-06: most of the
+            # 07-04 rollout's products got duplicated this way on the next
+            # full run). So the create fallback is only allowed when our own
+            # records say this SKU was never successfully submitted: no real
+            # OPC on record and no submitted/synced status. Rows whose last
+            # submission outright Failed keep the fallback - re-creating is
+            # exactly how those recover.
+            opc_on_record = str(existing.get("OPC") or row.get("OPC") or "").strip()
+            already_created = (
+                opc_on_record.upper() not in ("", "PENDING")
+                or last_sync_status.startswith(("Synced", "Pending Approval", "Awaiting OnBuy go-live"))
+            )
+
             try:
-                action, result = onbuy.sync_product(
-                    sku=sku,
-                    ean=upc_for_onbuy,
-                    title=title or str(row.get("Title") or ""),
-                    description=description,
-                    brand=brand_for_onbuy,
-                    category_id=category_id,
-                    price=selling_price,
-                    stock=stock,
-                    main_image=main_image,
-                    additional_images=additional_images,
-                )
+                if already_created:
+                    result = onbuy.update_listing(sku=sku, price=selling_price, stock=stock)
+                    action = "updated"
+                else:
+                    action, result = onbuy.sync_product(
+                        sku=sku,
+                        ean=upc_for_onbuy,
+                        title=title or str(row.get("Title") or ""),
+                        description=description,
+                        brand=brand_for_onbuy,
+                        category_id=category_id,
+                        price=selling_price,
+                        stock=stock,
+                        main_image=main_image,
+                        additional_images=additional_images,
+                    )
                 logger.info("OnBuy %s: %s", action, sku)
                 last_onbuy_sync = now_str
                 if action == "created":
@@ -793,6 +837,28 @@ def main():
                     sync_status = "Synced"
                     onbuy_product_created = "TRUE"
                     onbuy_listing_active = "TRUE"
+            except PermanentError as exc:
+                if already_created and "SKU does not exist" in str(exc):
+                    # Created earlier, OnBuy just hasn't made the listing
+                    # addressable yet - not a failure, and NOT a reason to
+                    # re-create. Stamp Last OnBuy Sync so this row rotates to
+                    # the back of the push-priority order (batch sort above)
+                    # instead of holding a front slot every run; the update
+                    # will simply succeed on a later attempt once OnBuy makes
+                    # the listing live.
+                    onbuy_deferred += 1
+                    sync_status = "Awaiting OnBuy go-live (created earlier - listing not yet updatable)"
+                    last_onbuy_sync = now_str
+                    logger.info(
+                        "Row %d (SKU %s): created earlier (OPC %s) but OnBuy's listing isn't "
+                        "updatable yet - deferring, not re-creating",
+                        i, sku, opc_on_record or "pending",
+                    )
+                else:
+                    onbuy_failed += 1
+                    run_had_errors = True
+                    sync_status = f"Failed: {str(exc)[:300]}"
+                    logger.error("OnBuy push failed for SKU %s: %s", sku, exc)
             except Exception as exc:
                 onbuy_failed += 1
                 run_had_errors = True
@@ -1023,8 +1089,8 @@ def main():
     # ================= FINAL LOGS + ALERTS =================
     logger.info("DONE")
     logger.info("Updated rows: %d", updated_count)
-    logger.info("OnBuy: %d created, %d updated, %d failed, %d removed (brand rejected)",
-                 onbuy_created, onbuy_updated, onbuy_failed, onbuy_removed)
+    logger.info("OnBuy: %d created, %d updated, %d deferred (awaiting go-live), %d failed, %d removed (brand rejected)",
+                 onbuy_created, onbuy_updated, onbuy_deferred, onbuy_failed, onbuy_removed)
     logger.info("Feed products: %d, skipped: %d", feed_count, skipped_feed)
     logger.info("Feed URL: %s", feed_url or "(not uploaded - see SUPABASE_URL/SUPABASE_SERVICE_KEY)")
     logger.info("Supabase database export: %s (%d rows)", "OK" if supabase_ok else "skipped/failed", len(supabase_rows))
@@ -1033,7 +1099,8 @@ def main():
         notify.send_alert_email(
             "Sync run finished with errors" if (fetch_failures or onbuy_failed) else "Sync run removed brand-rejected product(s)",
             f"eBay fetch failures: {fetch_failures}\n"
-            f"OnBuy push failures: {onbuy_failed} (created {onbuy_created}, updated {onbuy_updated})\n"
+            f"OnBuy push failures: {onbuy_failed} (created {onbuy_created}, updated {onbuy_updated}, "
+            f"deferred awaiting go-live {onbuy_deferred})\n"
             f"Rows removed (brand owned by another seller): {onbuy_removed}"
             + (f" - SKUs: {', '.join(removed_skus)}" if removed_skus else "") + "\n"
             f"Updated rows: {updated_count}\n"
