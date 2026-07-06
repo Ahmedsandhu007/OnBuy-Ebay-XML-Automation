@@ -115,7 +115,13 @@ class OnBuyClient:
             "rrp": str(price),
             "product_name": title[:150],
             "brand_name": brand or "Unbranded",
-            "description": description,
+            # OnBuy nulls an empty-string description server-side and then
+            # rejects the whole create with 400 "description must be a
+            # string" (seen 2026-07-06 for eBay listings that genuinely have
+            # no description text). Fall back to the title so those products
+            # can still be listed; the Sheet/Supabase keep the real (empty)
+            # description.
+            "description": (description or "").strip() or title[:150],
             "default_image": main_image,
             "additional_images": additional_images[:10],
             "force_update": True,
