@@ -542,10 +542,25 @@ def main():
             sheet.batch_update(category_updates)
 
     # ================= PRODUCT ORDER =================
+    # Rows with no usable Supplier URL yet (e.g. a SKU pre-filled ahead of the
+    # rest of the row) can never actually be processed - the main loop below
+    # just silently `continue`s past them without ever setting Last Checked
+    # Time. Left in the sort, they never age out of "oldest first," so once
+    # there are more of them than MAX_PRODUCTS_PER_RUN they permanently
+    # occupy every run's entire batch and starve real, fully-filled-in rows
+    # of any processing at all (confirmed: 770 SKU-only rows blocked all 500
+    # slots in a run, so none of the 376 real rows were even reached).
+    # Filtering them out before the sort/slice means batch capacity is only
+    # ever spent on rows that can actually make progress.
+    processable = [(idx, row) for idx, row in enumerate(data) if "ebay." in str(row.get("Supplier URL", "")).strip().lower()]
+    skipped_incomplete = len(data) - len(processable)
+    if skipped_incomplete:
+        logger.info("Skipping %d row(s) with no eBay Supplier URL yet (not counted against this run's batch)", skipped_incomplete)
+
     if FULL_REFRESH:
-        sorted_data = list(enumerate(data))
+        sorted_data = processable
     else:
-        sorted_data = sorted(enumerate(data), key=lambda x: parse_time(x[1].get("Last Checked Time", "")))
+        sorted_data = sorted(processable, key=lambda x: parse_time(x[1].get("Last Checked Time", "")))
 
     # While testing the OnBuy API push against a specific SKU allowlist, move
     # those SKUs to the front of the queue - otherwise a manual test run can

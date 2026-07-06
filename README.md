@@ -147,3 +147,10 @@ grow overall.
 Google Sheets writes are batched into a single API call per run (not one per
 row), regardless of batch size, so growing the batch size doesn't risk
 Google's own rate limits either.
+
+Rows with no `Supplier URL` yet (e.g. a SKU filled in ahead of the rest of
+the row) don't count against the batch size at all - only rows with a
+usable eBay link compete for the `MAX_PRODUCTS_PER_RUN` slots each run. This
+matters at scale: a large number of pre-filled-SKU-only rows sitting in the
+Sheet won't block or slow down your actual, complete products from being
+processed.
