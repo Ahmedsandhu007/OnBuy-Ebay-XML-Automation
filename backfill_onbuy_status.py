@@ -100,10 +100,16 @@ for sku, entry in found.items():
 
     if status == "success":
         opc = entry.get("opc", "")
+        # OnBuy's queue history is the only place this ever appears - not in
+        # create_product/update_listing's own responses - and confirmed
+        # 2026-07-06 to be the canonical live page, distinct from whatever
+        # URL the Add Listing page's own search links to.
+        product_url = entry.get("product_url", "")
         sync_status = "Synced"
         listing_active = "TRUE"
     else:
         opc = None
+        product_url = None
         sync_status = f"Failed: {entry.get('error_message', 'unknown error')}"
         listing_active = "FALSE"
 
@@ -111,6 +117,8 @@ for sku, entry in found.items():
 
     if opc and "OPC" in col_map:
         sheet_updates.append({"range": f"{col_letter(col_map['OPC'])}{row_index}", "values": [[opc]]})
+    if product_url and "Product URL" in col_map:
+        sheet_updates.append({"range": f"{col_letter(col_map['Product URL'])}{row_index}", "values": [[product_url]]})
     if "Sync Status" in col_map:
         sheet_updates.append({"range": f"{col_letter(col_map['Sync Status'])}{row_index}", "values": [[sync_status]]})
     if "OnBuy Listing Active" in col_map:
@@ -127,6 +135,12 @@ for sku, entry in found.items():
     supabase_row["OnBuy Listing Active"] = listing_active
     if opc:
         supabase_row["OPC"] = opc
+    # "Product URL" is a brand-new column (2026-07-06) - only write it if the
+    # table actually has it (select=* would have returned it in `existing`
+    # if so). Without this guard, upserting an unknown column would reject
+    # the whole batch's Supabase write, not just skip this one field.
+    if product_url and "Product URL" in existing:
+        supabase_row["Product URL"] = product_url
     supabase_rows.append(supabase_row)
 
 if sheet_updates:
