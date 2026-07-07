@@ -46,11 +46,21 @@ pending = {}  # sku -> sheet row index
 for idx, row in enumerate(data):
     sku = str(row.get("SKU") or "").strip()
     status = str(row.get("Sync Status") or "").strip()
-    if sku and status == "Pending Approval":
+    opc = str(row.get("OPC") or "").strip().upper()
+    # "Pending Approval" = submitted, queue outcome never fetched. A sync run
+    # can also flip a row to "Awaiting OnBuy go-live" BEFORE this backfill
+    # ever saw its queue outcome (its OPC is still PENDING in that case) -
+    # those must be checked too, or a submission that actually FAILED in the
+    # queue would sit in "Awaiting" forever, never learning it needs the
+    # re-create that a "Failed" status would trigger.
+    needs_check = status == "Pending Approval" or (
+        status.startswith("Awaiting OnBuy go-live") and opc in ("", "PENDING")
+    )
+    if sku and needs_check:
         pending[sku] = idx + 2
 
 if not pending:
-    print("No rows with Sync Status = 'Pending Approval' found - nothing to check.")
+    print("No rows needing a queue-status check found - nothing to do.")
     raise SystemExit(0)
 
 print(f"Checking {len(pending)} pending SKU(s) against OnBuy's queue history...")
