@@ -195,6 +195,51 @@ def tokenize(text):
     return set(re.findall(r"\w+", str(text).lower()))
 
 
+# Words too generic to say anything about a product's category - they appear
+# in almost every eBay title/description ("premium quality", "free shipping",
+# "brand new", "UK stock"...) and were a major source of wrong matches.
+_CATEGORY_STOPWORDS = {
+    "and", "the", "for", "with", "from", "this", "that", "your", "our", "you",
+    "are", "not", "new", "brand", "pack", "pcs", "set", "free", "shipping",
+    "delivery", "returns", "quality", "premium", "high", "best", "top", "hot",
+    "sale", "gift", "uni", "unisex", "universal", "portable", "durable",
+    "stock", "fast", "included", "includes", "colour", "color", "size", "uk",
+    "usa", "use", "product", "products", "item", "items", "piece",
+    "pieces", "note", "please", "buy", "seller", "customer", "support",
+    "service", "day", "days", "one", "two", "three", "all", "small", "large",
+    "mini", "big", "medium", "extra", "travel",
+}
+
+# Category subtrees that share everyday vocabulary with ordinary physical
+# products and kept stealing them in testing (on the Arden store, where this
+# matcher was rewritten first): a microwave FOOD COVER matched "Cooking
+# Books" and "Kitchen Role Play Toys", a SLEEP MASK matched "BDSM Masks &
+# Blindfolds". Each subtree is only allowed when the product explicitly uses
+# one of its own words (stemmed forms, matching category_match_tokens'
+# output - hence "dres" for dress).
+_GUARDED_SUBTREES = (
+    ("books, movies & music",
+     {"book", "dvd", "blu", "vinyl", "movie", "film", "music", "album", "magazine", "novel"}),
+    ("health & beauty > sex & adult",
+     {"adult", "bdsm", "erotic", "bondage", "sex"}),
+    ("toys & games > pretend play & fancy dress",
+     {"toy", "pretend", "costume", "fancy", "dres", "kid", "child", "children"}),
+)
+
+
+def _stem(word):
+    # Bridge singular/plural ("adapter" <-> "Adapters", "sling" <-> "Slings")
+    # without a real stemmer - enough for category-path matching.
+    return word[:-1] if len(word) > 3 and word.endswith("s") else word
+
+
+def category_match_tokens(text):
+    """Meaningful whole-word tokens for category matching: 3+ characters,
+    not a stopword, not a bare number, plural-normalized."""
+    return {_stem(w) for w in tokenize(text)
+            if len(w) >= 3 and w not in _CATEGORY_STOPWORDS and not w.isdigit()}
+
+
 def clean_category(cat):
     if not cat:
         return ""
@@ -491,23 +536,62 @@ def main():
     def is_valid_onbuy_category(category):
         return str(category).strip().lower() in valid_onbuy_categories
 
+    # Precomputed token sets per category path (and per leaf segment) - both
+    # for speed and correctness. The old scorer gave +2 whenever a product
+    # word appeared as a SUBSTRING anywhere in the path text, so a
+    # DisplayPort adapter (description mentioning "home", "supports" - and
+    # "port" is literally a substring of "Supports") landed in "Braces,
+    # Splints & Slings > Arm, Hand & Finger Supports" (found on the Arden
+    # store; same matcher here). This version matches whole words only,
+    # weights title words over description words (titles identify the
+    # product; descriptions are marketing text), weights the leaf segment
+    # over ancestors, and refuses to guess without at least one strong
+    # title-level match. Rows already holding a valid category path are
+    # never touched, so existing catalog categories are unaffected.
+    category_tokens = {}
+    category_leaf_tokens = {}
+    category_guard = {}  # path -> required word set (None = unguarded)
+    for _path in onbuy_categories:
+        category_tokens[_path] = category_match_tokens(_path)
+        category_leaf_tokens[_path] = category_match_tokens(_path.split(">")[-1])
+        _low = _path.strip().lower()
+        category_guard[_path] = next(
+            (req for prefix, req in _GUARDED_SUBTREES if _low.startswith(prefix)), None)
+
     def map_onbuy_category(title, current_category, description=""):
-        product_text = f"{title}\n{current_category}\n{description}".lower()
-        product_words = tokenize(product_text)
+        title_words = category_match_tokens(f"{title}\n{current_category}")
+        desc_words = category_match_tokens(description) - title_words
+        all_words = title_words | desc_words
+        if not all_words:
+            return current_category
+
+        def weight(word):
+            # Longer words are more specific; title words count triple.
+            return len(word) * (3 if word in title_words else 1)
 
         best_match = None
         best_score = 0
+        best_has_title_hit = False
         for category_path in onbuy_categories:
-            category_words = tokenize(category_path)
-            score = len(product_words.intersection(category_words))
-            for word in product_words:
-                if word in category_path.lower():
-                    score += 2
+            required = category_guard[category_path]
+            if required and not (all_words & required):
+                continue
+            hits = all_words & category_tokens[category_path]
+            if not hits:
+                continue
+            leaf_hits = hits & category_leaf_tokens[category_path]
+            score = sum(weight(w) for w in hits) + 2 * sum(weight(w) for w in leaf_hits)
             if score > best_score:
                 best_score = score
                 best_match = category_path
+                best_has_title_hit = bool(hits & title_words)
 
-        if best_match and best_score >= 2:
+        # Refuse to guess unless at least one TITLE word matched (titles
+        # identify the product; a description-only match is marketing noise).
+        # An unmatched row keeps its current/blank category - the push block
+        # below turns that into a clear "fill in the Category column" status
+        # instead of submitting a wrong or null category to OnBuy.
+        if best_match and best_score >= 9 and best_has_title_hit:
             return best_match
         return current_category
 
@@ -807,6 +891,14 @@ def main():
             )
 
             try:
+                if not already_created and category_id is None:
+                    # A create can't succeed without a category (OnBuy 400s
+                    # on a null category_id), and the matcher now refuses to
+                    # guess rather than pick something wrong - flag the row
+                    # for a human instead of burning the API call on a known
+                    # rejection. Price/stock updates don't need a category,
+                    # so already-created rows are unaffected.
+                    raise PermanentError("no matching OnBuy category - fill in the Category column and it will retry")
                 if already_created:
                     result = onbuy.update_listing(sku=sku, price=selling_price, stock=stock)
                     action = "updated"
