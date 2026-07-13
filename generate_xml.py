@@ -133,6 +133,16 @@ def is_valid_gtin(code):
     return str((10 - total % 10) % 10) == check_digit
 
 
+def sku_numeric_part(sku):
+    """The digits of the SKU ARE the product's barcode (user policy
+    2026-07-13, both stores): a SKU may carry non-digit decoration around
+    the barcode ("GTV-5012345678900") and everything validated or sent as
+    an EAN/UPC uses only the digits. The decoration must not itself contain
+    digits - a "-1" style suffix corrupts the barcode and will (correctly)
+    fail the check-digit test."""
+    return re.sub(r"\D", "", str(sku or ""))
+
+
 # Values eBay sellers sometimes put in the "Brand" aspect that are not
 # actually a brand name - typically someone answering a yes/no-style prompt
 # literally ("Branded") rather than naming the brand. User's explicit policy
@@ -818,10 +828,11 @@ def main():
         # Runs before the sheet write below so the outcome (Sync Status, OPC
         # placeholder, etc.) can go into the SAME batch_update call instead of
         # a second Sheets API round-trip per row.
-        # EAN column (Sheet/Supabase) is purely informational - whatever real
-        # barcode eBay has, or blank if it has none. NOT sent to OnBuy - see
-        # below.
-        ean = ebay_data.get("product_code") or ""
+        # EAN column (Sheet/Supabase): the SKU's numeric part IS the EAN
+        # (user policy 2026-07-13 - every product is a new listing under the
+        # seller's own barcode). eBay's own barcode is only a fallback for
+        # rows whose SKU somehow has no digits.
+        ean = sku_numeric_part(sku) or ebay_data.get("product_code") or ""
         sync_status = None
         onbuy_product_created = None
         onbuy_listing_active = None
@@ -853,14 +864,16 @@ def main():
                 continue
 
             onbuy_pushes_this_run += 1
-            # OnBuy's product code = the seller's own SKU, not the eBay-sourced
-            # EAN above - SKUs here are the seller's pre-validated UPCs. Being
-            # numeric and the right length isn't enough on its own - confirmed
-            # two real SKUs got rejected ("not a valid product code") despite
-            # both being 12-digit numbers, because their check digit isn't a
-            # real GS1/UPC checksum. Only forward it if it actually passes
-            # that check; otherwise send blank rather than repeat the rejection.
-            upc_for_onbuy = sku if is_valid_gtin(sku) else ""
+            # OnBuy's product code = the numeric part of the seller's own SKU
+            # (the pre-validated UPC; non-digit decoration around it is
+            # allowed and stripped). Being numeric and the right length isn't
+            # enough on its own - confirmed two real SKUs got rejected ("not
+            # a valid product code") despite both being 12-digit numbers,
+            # because their check digit isn't a real GS1/UPC checksum. Only
+            # forward it if it actually passes that check; otherwise send
+            # blank rather than repeat the rejection.
+            sku_digits = sku_numeric_part(sku)
+            upc_for_onbuy = sku_digits if is_valid_gtin(sku_digits) else ""
 
             # OnBuy's own brand-matching backend can also crash outright on a
             # brand it doesn't recognize ("MatchedBrandData...Argument #1
