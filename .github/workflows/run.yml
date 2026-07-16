@@ -61,8 +61,6 @@ jobs:
           EBAY_DAILY_CALL_BUDGET: ${{ vars.EBAY_DAILY_CALL_BUDGET }}
           RUNS_PER_DAY: ${{ vars.RUNS_PER_DAY }}
           MAX_PRODUCTS_PER_RUN: ${{ vars.MAX_PRODUCTS_PER_RUN }}
-          ALI_APP_KEY: ${{ secrets.ALI_APP_KEY }}
-          ALI_APP_SECRET: ${{ secrets.ALI_APP_SECRET }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           SUPABASE_FEED_BUCKET: ${{ vars.SUPABASE_FEED_BUCKET }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
